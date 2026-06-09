@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bait2contig"
+version = "0.1.0"
+description = "Find contigs corresponding to bait/reference sequences using minimap2 PAF output."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "bait2contig developers" }
+]
+keywords = ["bioinformatics", "contigs", "minimap2", "FASTA", "PAF"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Environment :: Console",
+]
+dependencies = []
+
+[project.optional-dependencies]
+monitor = ["psutil"]
+test = ["pytest"]
+
+[project.scripts]
+bait2contig = "bait2contig.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bait2contig*"]
