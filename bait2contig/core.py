@@ -7,9 +7,20 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
+
+from rich.progress import (
+    BarColumn,
+    FileSizeColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TransferSpeedColumn,
+)
 
 from . import __version__
 from .io import (
@@ -463,6 +474,121 @@ def make_tmp_paf(tmp_dir: str | Path) -> str:
     return path
 
 
+def fasta_progress_total(path: str | Path) -> Optional[int]:
+    text_path = str(path)
+    if text_path.endswith(".gz"):
+        return None
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
+def format_bases(count: int) -> str:
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.2f} Gb"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.2f} Mb"
+    if count >= 1_000:
+        return f"{count / 1_000:.2f} kb"
+    return f"{count} bp"
+
+
+class FastaProgressTracker:
+    """Throttle FASTA parser progress updates to keep large inputs responsive."""
+
+    def __init__(self, progress: Progress, task_id: int, total: Optional[int]) -> None:
+        self.progress = progress
+        self.task_id = task_id
+        self.total = total
+        self.bytes_seen = 0
+        self.records_seen = 0
+        self.bases_seen = 0
+        self._last_update = time.time()
+        self._last_update_bytes = 0
+
+    def __call__(self, bytes_delta: int, records_delta: int, bases_delta: int) -> None:
+        self.bytes_seen += bytes_delta
+        self.records_seen += records_delta
+        self.bases_seen += bases_delta
+        now = time.time()
+        if self.bytes_seen - self._last_update_bytes >= 1_048_576 or now - self._last_update >= 0.25:
+            self.flush()
+
+    def flush(self) -> None:
+        completed = self.bytes_seen
+        if self.total is not None:
+            completed = min(completed, self.total)
+        self.progress.update(
+            self.task_id,
+            completed=completed,
+            records=f"{self.records_seen:,}",
+            bases=format_bases(self.bases_seen),
+        )
+        self._last_update = time.time()
+        self._last_update_bytes = self.bytes_seen
+
+
+def make_fasta_progress(logger: Logger) -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(),
+        FileSizeColumn(),
+        TransferSpeedColumn(),
+        TimeElapsedColumn(),
+        TextColumn("{task.fields[records]} seq"),
+        TextColumn("{task.fields[bases]}"),
+        console=logger.console,
+        transient=True,
+        disable=not logger.progress_enabled,
+    )
+
+
+def load_fasta_inputs(
+    args,
+    *,
+    logger: Logger,
+    monitor: ResourceMonitor,
+) -> tuple[Dict[str, FastaRecord], Dict[str, FastaRecord]]:
+    """Read bait and contig FASTA inputs with progress and parallel file loading."""
+
+    monitor.set_stage("loading_fasta_inputs")
+    logger.info("loading FASTA inputs")
+    inputs = {
+        "bait": args.bait,
+        "contigs": args.contigs,
+    }
+    results: dict[str, Dict[str, FastaRecord]] = {}
+
+    with make_fasta_progress(logger) as progress:
+        trackers: dict[str, FastaProgressTracker] = {}
+        for name, path in inputs.items():
+            total = fasta_progress_total(path)
+            task_id = progress.add_task(
+                f"{name} FASTA",
+                total=total,
+                records="0",
+                bases="0 bp",
+            )
+            trackers[name] = FastaProgressTracker(progress, task_id, total)
+
+        def read_one(name: str, path: str) -> tuple[str, Dict[str, FastaRecord]]:
+            tracker = trackers[name]
+            try:
+                return name, read_fasta(path, progress=tracker)
+            finally:
+                tracker.flush()
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="bait2contig-fasta") as executor:
+            futures = [executor.submit(read_one, name, path) for name, path in inputs.items()]
+            for future in as_completed(futures):
+                name, records = future.result()
+                results[name] = records
+
+    return results["bait"], results["contigs"]
+
+
 def run_search(args) -> int:
     """Run bait2contig search from parsed argparse arguments."""
 
@@ -525,18 +651,18 @@ def run_search(args) -> int:
         logger.info(f"log: {log_path}")
         logger.info(f"resume: {'enabled' if args.resume else 'disabled'}")
         logger.info(f"rerun: {'enabled' if args.rerun else 'disabled'}")
+        logger.info(f"resource monitor backend: {monitor.backend}")
         logger.marker(START_MARKER, start_params)
 
         executable = executable_for_resume
         if executable is None:
             raise SearchError("minimap2 was not found. Please install minimap2 or provide its path with --minimap2.")
 
-        logger.info("checking input files")
-        bait = read_fasta(args.bait)
-        contigs = read_fasta(args.contigs)
+        bait, contigs = load_fasta_inputs(args, logger=logger, monitor=monitor)
         logger.info(f"loaded bait sequences: {len(bait)}")
         logger.info(f"loaded contigs: {len(contigs)}")
 
+        monitor.set_stage("loading_annotations")
         lineage = read_lineage(args.lineage) if args.lineage else None
         if lineage is not None:
             extra_lineage_ids = sorted(set(lineage) - set(bait))
@@ -545,6 +671,7 @@ def run_search(args) -> int:
         circular_ids = read_circular_list(args.circular_list) if args.circular_list else None
 
         tmp_paf = make_tmp_paf(tmp_dir)
+        monitor.set_stage("running_minimap2")
         run_minimap2(
             executable=executable,
             preset=args.preset,
@@ -556,9 +683,11 @@ def run_search(args) -> int:
             monitor=monitor,
         )
 
+        monitor.set_stage("parsing_paf")
         logger.info("parsing PAF")
         paf_hits = parse_paf(tmp_paf)
         raw_alignment_count = len(paf_hits)
+        monitor.set_stage("filtering_hits")
         all_hits = annotate_paf_hits(paf_hits, contigs=contigs, lineage=lineage, circular_ids=circular_ids)
         kept_hits = filter_hits(
             all_hits,
@@ -574,6 +703,7 @@ def run_search(args) -> int:
         logger.info(f"raw alignments: {raw_alignment_count}")
         logger.info(f"kept alignments: {kept_alignment_count}")
 
+        monitor.set_stage("writing_hits")
         write_hits_tsv(actual_out, kept_hits, include_lineage=lineage is not None)
 
         if args.keep_paf:
@@ -586,6 +716,7 @@ def run_search(args) -> int:
             tmp_paf = None
 
         if actual_extract:
+            monitor.set_stage("extracting_contigs")
             extraction_hits = select_extraction_hits(
                 all_hits,
                 mode=args.extract_mode,

@@ -12,7 +12,8 @@ This document records implementation details that are easy to forget when mainta
   - `bait2contig/io.py`
   - `bait2contig/log.py`
   - `bait2contig/summary.py`
-- Required Python dependencies are avoided. `psutil` is optional.
+- Required Python dependencies are limited to terminal/help/logging support: `rich`, `rich-argparse`, and `psutil`.
+- Resource monitoring still has a standard-library fallback when `psutil` is unavailable.
 - The CLI uses `argparse`, not `click` or `typer`.
 - The mapping backend is `minimap2`; no alternate aligners are currently supported.
 
@@ -287,9 +288,10 @@ Log files remain plain text. Terminal output may be colored, but log files must 
 
 Resource monitoring behavior:
 
-- Prefer `psutil` when installed.
-- Fall back to standard-library `resource`.
+- Prefer `psutil` for detailed process and child-process CPU/RSS monitoring.
+- Fall back to standard-library `resource` plus Linux `/proc` child CPU sampling when available.
 - Attempt to include child process usage for minimap2.
+- Include the current workflow stage in periodic resource logs.
 - Resource monitoring failures must not fail the main command.
 - CPU percent can exceed 100 because minimap2 is multithreaded.
 

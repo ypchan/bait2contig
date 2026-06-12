@@ -7,7 +7,7 @@ import gzip
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, TextIO, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, TextIO, Tuple
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,10 @@ def infer_circular_from_header(header: str) -> bool:
     return any(token in circular_tokens for token in tokens)
 
 
-def read_fasta(path: str | Path) -> Dict[str, FastaRecord]:
+FastaProgressCallback = Callable[[int, int, int], None]
+
+
+def read_fasta(path: str | Path, progress: Optional[FastaProgressCallback] = None) -> Dict[str, FastaRecord]:
     """Read a plain or gzip FASTA file into records keyed by first-token ID."""
 
     records: Dict[str, FastaRecord] = {}
@@ -108,11 +111,15 @@ def read_fasta(path: str | Path) -> Dict[str, FastaRecord]:
             sequence="".join(seq_parts),
             is_circular=infer_circular_from_header(header),
         )
+        if progress is not None:
+            progress(0, 1, 0)
         header = None
         seq_parts = []
 
     with open_text(path, "rt") as handle:
         for line_number, line in enumerate(handle, start=1):
+            if progress is not None:
+                progress(len(line), 0, 0)
             line = line.rstrip("\n\r")
             if not line:
                 continue
@@ -124,7 +131,10 @@ def read_fasta(path: str | Path) -> Dict[str, FastaRecord]:
             else:
                 if header is None:
                     raise ValueError(f"sequence found before FASTA header at line {line_number}")
-                seq_parts.append(line.strip())
+                sequence = line.strip()
+                seq_parts.append(sequence)
+                if progress is not None:
+                    progress(0, 0, len(sequence))
     flush()
     return records
 

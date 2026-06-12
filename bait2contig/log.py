@@ -11,6 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from rich.console import Console
+from rich.text import Text
+
 from .io import ensure_parent_dir, open_text
 
 try:  # Optional dependency.
@@ -45,14 +48,13 @@ class MarkerBlock:
 class Logger:
     """Write grep-friendly logs to stderr and a plain-text log file."""
 
-    COLORS = {
-        "INFO": "\033[36m",
-        "WARN": "\033[33m",
-        "ERROR": "\033[31m",
-        "DONE": "\033[32m",
-        "RESOURCE": "\033[2m",
+    STYLES = {
+        "INFO": "cyan",
+        "WARN": "yellow",
+        "ERROR": "bold red",
+        "DONE": "green",
+        "RESOURCE": "dim",
     }
-    RESET = "\033[0m"
 
     def __init__(
         self,
@@ -69,6 +71,15 @@ class Logger:
         self.quiet = quiet
         self.verbose = verbose
         self.color = (not no_color) and sys.stderr.isatty()
+        self._console = Console(stderr=True, color_system="auto" if self.color else None)
+
+    @property
+    def console(self) -> Console:
+        return self._console
+
+    @property
+    def progress_enabled(self) -> bool:
+        return (not self.quiet) and self._console.is_terminal
 
     def close(self) -> None:
         if not self._handle.closed:
@@ -80,16 +91,24 @@ class Logger:
         return True
 
     def emit(self, level: str, message: str) -> None:
-        tag = f"[{level}]".ljust(11)
-        plain_line = f"{tag}{message}"
+        timestamp = now_iso()
+        tag = f"[{level}]"
+        level_field = f"{tag:<10}"
+        plain_line = f"{timestamp} {level_field} {message}"
         self._handle.write(f"{plain_line}\n")
         self._handle.flush()
         if self._screen_enabled(level):
-            if self.color and level in self.COLORS:
-                sys.stderr.write(f"{self.COLORS[level]}{plain_line}{self.RESET}\n")
+            if self.color and level in self.STYLES:
+                text = Text.assemble(
+                    (timestamp, "dim"),
+                    " ",
+                    (level_field, self.STYLES[level]),
+                    " ",
+                    message,
+                )
+                self._console.print(text, soft_wrap=True)
             else:
-                sys.stderr.write(f"{plain_line}\n")
-            sys.stderr.flush()
+                self._console.print(plain_line, soft_wrap=True)
 
     def info(self, message: str) -> None:
         self.emit("INFO", message)
@@ -131,12 +150,28 @@ class ResourceMonitor:
         self._child_pid: Optional[int] = None
         self._cpu_samples: List[float] = []
         self._peak_rss_mb: Optional[float] = None
+        self._stage = "startup"
+        self._lock = threading.Lock()
+        self._last_wall = self.start_time
+        self._last_cpu_seconds = self._fallback_cpu_seconds()
         self._process = psutil.Process(os.getpid()) if psutil is not None else None
         if self._process is not None:
             try:
                 self._process.cpu_percent(None)
             except Exception:
                 pass
+
+    @property
+    def backend(self) -> str:
+        return "psutil" if psutil is not None else "stdlib"
+
+    def set_stage(self, stage: str) -> None:
+        with self._lock:
+            self._stage = stage
+
+    def _current_stage(self) -> str:
+        with self._lock:
+            return self._stage
 
     def set_child_pid(self, pid: int) -> None:
         self._child_pid = pid
@@ -176,7 +211,8 @@ class ResourceMonitor:
             if write_log:
                 elapsed = time.time() - self.start_time
                 self.logger.resource(
-                    "elapsed={:.1f}s rss_mb={} cpu_percent={}".format(
+                    "stage={} elapsed={:.1f}s rss_mb={} cpu_percent={}".format(
+                        self._current_stage(),
                         elapsed,
                         format_metric(rss_mb, digits=1),
                         format_metric(cpu_percent, digits=1),
@@ -208,7 +244,26 @@ class ResourceMonitor:
                 except Exception:
                     continue
             return (rss / (1024 * 1024), cpu)
-        return (resource_peak_rss_mb(), None)
+        return (resource_peak_rss_mb(), self._fallback_cpu_percent())
+
+    def _fallback_cpu_percent(self) -> Optional[float]:
+        now = time.time()
+        cpu_seconds = self._fallback_cpu_seconds()
+        wall_delta = now - self._last_wall
+        cpu_delta = cpu_seconds - self._last_cpu_seconds
+        self._last_wall = now
+        self._last_cpu_seconds = cpu_seconds
+        if wall_delta <= 0:
+            return None
+        return max(0.0, (cpu_delta / wall_delta) * 100.0)
+
+    def _fallback_cpu_seconds(self) -> float:
+        seconds = process_cpu_seconds()
+        if self._child_pid is not None:
+            child_seconds = proc_cpu_seconds(self._child_pid)
+            if child_seconds is not None:
+                seconds += child_seconds
+        return seconds
 
 
 def now_iso() -> str:
@@ -246,6 +301,29 @@ def resource_peak_rss_mb() -> Optional[float]:
         if sys.platform == "darwin":
             return raw / (1024 * 1024)
         return raw / 1024
+    except Exception:
+        return None
+
+
+def process_cpu_seconds() -> float:
+    if resource is not None:
+        try:
+            own = resource.getrusage(resource.RUSAGE_SELF)
+            child = resource.getrusage(resource.RUSAGE_CHILDREN)
+            return own.ru_utime + own.ru_stime + child.ru_utime + child.ru_stime
+        except Exception:
+            pass
+    return time.process_time()
+
+
+def proc_cpu_seconds(pid: int) -> Optional[float]:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = stat.rsplit(")", 1)[1].strip().split()
+        ticks = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+        user_ticks = int(fields[11])
+        system_ticks = int(fields[12])
+        return (user_ticks + system_ticks) / ticks
     except Exception:
         return None
 

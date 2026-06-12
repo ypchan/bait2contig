@@ -31,8 +31,9 @@ A lightweight, high-performance command-line tool for finding contigs that match
 
 **Requirements:** Python 3.9 or newer
 
-Optional dependencies:
-- `psutil` – For detailed CPU and memory monitoring (falls back to standard library if not installed)
+Python dependencies installed automatically:
+- `rich` and `rich-argparse` – For readable help, progress, and terminal logs.
+- `psutil` – For detailed CPU and memory monitoring. A standard-library fallback is still used if `psutil` is unavailable.
 
 ### From GitHub (Recommended)
 
@@ -757,10 +758,10 @@ bait2contig search \
 Resource logs record periodic snapshots:
 
 ```
-[RESOURCE] elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
+2026-06-12T09:30:00+08:00 [RESOURCE] stage=running_minimap2 elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
 ```
 
-> **Note:** CPU percent may exceed 100 (multithread). Falls back to standard library if `psutil` unavailable.
+During large FASTA loading, interactive terminals show live progress bars with bytes, sequence counts, and parsed bases. CPU percent may exceed 100 because `minimap2` is multithreaded.
 
 ### Help Colors
 

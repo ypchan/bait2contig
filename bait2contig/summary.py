@@ -357,7 +357,9 @@ def run_summarize(args) -> int:
         logger.info(f"log: {log_path}")
         logger.info(f"resume: {'enabled' if args.resume else 'disabled'}")
         logger.info(f"rerun: {'enabled' if args.rerun else 'disabled'}")
+        logger.info(f"resource monitor backend: {monitor.backend}")
         logger.marker(START_MARKER, start_params)
+        monitor.set_stage("summarizing_hits")
         stats = summarize_file(
             hits_path=args.hits,
             out_path=actual_out,

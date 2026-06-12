@@ -8,47 +8,22 @@ import os
 import re
 import sys
 
+from rich.console import Console
+from rich_argparse import RichHelpFormatter
+
 from .core import LoggedSearchError, SearchError, run_search
 from .summary import LoggedSummaryError, SummaryError, run_summarize
 
 
-class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+class HelpFormatter(RichHelpFormatter):
     """Readable argparse formatter for grouped bait2contig help."""
 
     use_color = False
-    RESET = "\033[0m"
-    COLORS = {
-        "usage": "\033[1;36m",
-        "section": "\033[1;34m",
-        "option": "\033[32m",
-    }
+    group_name_formatter = str
 
     def __init__(self, prog: str) -> None:
-        super().__init__(prog, max_help_position=32, width=100)
-
-    def _color(self, text: str, role: str) -> str:
-        if not self.use_color:
-            return text
-        return f"{self.COLORS[role]}{text}{self.RESET}"
-
-    def start_section(self, heading: str | None) -> None:
-        super().start_section(self._color(heading, "section") if heading else heading)
-
-    def _format_usage(self, usage, actions, groups, prefix):
-        text = super()._format_usage(usage, actions, groups, prefix)
-        if self.use_color:
-            text = text.replace("usage:", self._color("usage:", "usage"), 1)
-        return text
-
-    def _format_action_invocation(self, action):
-        if not self.use_color or not action.option_strings:
-            return super()._format_action_invocation(action)
-        colored_options = [self._color(option, "option") for option in action.option_strings]
-        if action.nargs == 0:
-            return ", ".join(colored_options)
-        default = self._get_default_metavar_for_optional(action)
-        args_string = self._format_args(action, default)
-        return ", ".join(f"{option} {args_string}" for option in colored_options)
+        console = Console(stderr=True, color_system="auto" if self.use_color else None)
+        super().__init__(prog, max_help_position=32, width=100, console=console)
 
 
 class SmartArgumentParser(argparse.ArgumentParser):
@@ -63,13 +38,14 @@ class SmartArgumentParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> None:
         self.print_usage(sys.stderr)
-        sys.stderr.write(f"ERROR: {self._friendly_error(message)}\n")
+        console = Console(stderr=True, color_system="auto" if HelpFormatter.use_color else None)
+        console.print(f"[bold red]ERROR:[/bold red] {self._friendly_error(message)}")
         hint = self._error_hint(message)
         if hint:
-            sys.stderr.write(f"{hint}\n")
+            console.print(hint, style="yellow")
         if self.example:
-            sys.stderr.write(f"Example:\n  {self.example}\n")
-        sys.stderr.write(f"Run '{self.prog} --help' for details.\n")
+            console.print(f"Example:\n  {self.example}", style="dim", soft_wrap=True)
+        console.print(f"Run '{self.prog} --help' for details.")
         self.exit(2)
 
     def _friendly_error(self, message: str) -> str:
@@ -180,6 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     search = subparsers.add_parser(
         "search",
+        prog="bait2contig search",
         help="Find contigs matching bait/reference sequences.",
         description="Find contigs matching bait/reference sequences.",
         formatter_class=HelpFormatter,
@@ -190,6 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     summarize = subparsers.add_parser(
         "summarize",
+        prog="bait2contig summarize",
         help="Summarize contigs anchored by each bait.",
         description="Summarize contigs anchored by each bait.",
         formatter_class=HelpFormatter,
@@ -355,26 +333,28 @@ def add_summarize_arguments(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    HelpFormatter.use_color = should_color_help(argv)
+    color = should_color_help(argv)
+    HelpFormatter.use_color = color
+    console = Console(stderr=True, color_system="auto" if color else None)
     parser = build_parser()
     args = parser.parse_args(argv)
     if not hasattr(args, "func"):
         parser.print_usage(sys.stderr)
-        sys.stderr.write("ERROR: missing command. Choose one of: search, summarize\n")
-        sys.stderr.write("Run 'bait2contig --help' for details.\n")
+        console.print("[bold red]ERROR:[/bold red] missing command. Choose one of: search, summarize")
+        console.print("Run 'bait2contig --help' for details.")
         return 2
     try:
         return int(args.func(args))
     except (LoggedSearchError, LoggedSummaryError):
         return 1
     except (SearchError, SummaryError) as exc:
-        sys.stderr.write(f"ERROR: {exc}\n")
+        console.print(f"[bold red]ERROR:[/bold red] {exc}")
         return 1
     except KeyboardInterrupt:
-        sys.stderr.write("ERROR: interrupted\n")
+        console.print("[bold red]ERROR:[/bold red] interrupted")
         return 130
     except Exception as exc:
-        sys.stderr.write(f"ERROR: {exc}\n")
+        console.print(f"[bold red]ERROR:[/bold red] {exc}")
         return 1
 
 

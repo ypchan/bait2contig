@@ -83,15 +83,18 @@ Python version:
 
 Python >= 3.9
 
-Prefer minimal dependencies.
+Prefer limited dependencies.
 
 Required dependencies:
-None if possible.
+rich
+Use it for terminal logs and progress rendering.
 
-Optional dependency:
+rich-argparse
+Use it for readable argparse help formatting.
+
 psutil
-If installed, use it for detailed CPU and memory monitoring.
-If not installed, the tool must still work using Python standard library fallback.
+Use it for detailed CPU and memory monitoring.
+If unavailable at runtime, the tool must still work using Python standard library fallback.
 
 Use argparse instead of typer/click to reduce dependencies.
 
@@ -1224,11 +1227,11 @@ Record runtime, CPU usage, and memory usage.
 
 Requirements:
 
-1. Prefer Python standard library `resource` for peak RSS.
-2. If psutil is installed, use psutil for detailed CPU and memory monitoring.
-3. If psutil is not installed, do not fail.
+1. Prefer psutil for detailed CPU and memory monitoring.
+2. If psutil is not installed, do not fail.
+3. Fall back to standard-library `resource` and Linux `/proc` child CPU sampling when available.
 4. Try to include minimap2 child process resource usage.
-5. Every --monitor-interval seconds, write a resource line to the log.
+5. Every --monitor-interval seconds, write a timestamped resource line to the log.
 6. Resource monitoring failure must not fail the main program.
 
 Resource log example:
@@ -1292,19 +1295,19 @@ Example search log:
 [INFO]     log: bait2contig.hits.tsv.gz.log
 [INFO]     resume: disabled
 [INFO]     rerun: disabled
-[INFO]     checking input files
-[INFO]     loaded bait sequences: 100
-[INFO]     loaded contigs: 5321
-[INFO]     running minimap2
-[RESOURCE] elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
-[INFO]     parsing PAF
-[INFO]     raw alignments: 284
-[INFO]     kept alignments: 42
-[DONE]     wrote output: bait2contig.hits.tsv.gz
-[DONE]     bait2contig search completed successfully
-[DONE]     runtime: 312.54 sec
-[DONE]     peak RSS: 1234.56 MB
-[DONE]     mean CPU: 632.4%
+2026-06-12T09:29:00+08:00 [INFO]     loading FASTA inputs
+2026-06-12T09:29:42+08:00 [INFO]     loaded bait sequences: 100
+2026-06-12T09:29:42+08:00 [INFO]     loaded contigs: 5321
+2026-06-12T09:30:00+08:00 [INFO]     running minimap2
+2026-06-12T09:30:30+08:00 [RESOURCE] stage=running_minimap2 elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
+2026-06-12T09:35:00+08:00 [INFO]     parsing PAF
+2026-06-12T09:35:01+08:00 [INFO]     raw alignments: 284
+2026-06-12T09:35:01+08:00 [INFO]     kept alignments: 42
+2026-06-12T09:35:02+08:00 [DONE]     wrote output: bait2contig.hits.tsv.gz
+2026-06-12T09:35:02+08:00 [DONE]     bait2contig search completed successfully
+2026-06-12T09:35:02+08:00 [DONE]     runtime: 312.54 sec
+2026-06-12T09:35:02+08:00 [DONE]     peak RSS: 1234.56 MB
+2026-06-12T09:35:02+08:00 [DONE]     mean CPU: 632.4%
 
 ============================================================
 20. Help message style
