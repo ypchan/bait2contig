@@ -91,7 +91,7 @@ class Logger:
         return True
 
     def emit(self, level: str, message: str) -> None:
-        timestamp = now_iso()
+        timestamp = now_log_time()
         tag = f"[{level}]"
         level_field = f"{tag:<10}"
         plain_line = f"{timestamp} {level_field} {message}"
@@ -208,7 +208,7 @@ class ResourceMonitor:
                     self._peak_rss_mb = rss_mb
             if cpu_percent is not None:
                 self._cpu_samples.append(cpu_percent)
-            if write_log:
+            if write_log and self.logger.verbose:
                 elapsed = time.time() - self.start_time
                 self.logger.resource(
                     "stage={} elapsed={:.1f}s rss_mb={} cpu_percent={}".format(
@@ -268,6 +268,10 @@ class ResourceMonitor:
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def now_log_time() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_log_value(value: object) -> str:

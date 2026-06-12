@@ -15,6 +15,15 @@ from bait2contig.io import FastaRecord, open_text, read_fasta
 from bait2contig.log import DONE_MARKER, FAILED_MARKER, START_MARKER, check_resume, parse_marker_blocks
 
 
+class FakeResourceLogger:
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+        self.messages = []
+
+    def resource(self, message):
+        self.messages.append(message)
+
+
 def hit(
     ctg_id,
     bait_id="bait1",
@@ -181,6 +190,35 @@ class FakeLogger:
 
     def warn(self, message):
         self.messages.append(message)
+
+
+def test_resource_monitor_periodic_logs_require_verbose():
+    from bait2contig.log import ResourceMonitor
+
+    logger = FakeResourceLogger(verbose=False)
+    monitor = ResourceMonitor(1, logger)
+    monitor.sample(write_log=True)
+    assert logger.messages == []
+
+    verbose_logger = FakeResourceLogger(verbose=True)
+    verbose_monitor = ResourceMonitor(1, verbose_logger)
+    verbose_monitor.sample(write_log=True)
+    assert verbose_logger.messages
+
+
+def test_logger_uses_short_human_timestamp(tmp_path):
+    from bait2contig.log import Logger
+
+    log = tmp_path / "run.log"
+    logger = Logger(log, no_color=True, quiet=True)
+    logger.info("hello")
+    logger.close()
+
+    line = log.read_text(encoding="utf-8").splitlines()[0]
+    assert line[4] == "-"
+    assert line[10] == " "
+    assert "T" not in line.split()[0]
+    assert "+08:00" not in line
 
 
 def test_no_extract_dedup_warning(tmp_path):

@@ -226,6 +226,20 @@ Keep intermediate PAF output.
 --tmp-dir DIR
 Temporary directory. Default: output directory.
 
+Contig index arguments:
+--contig-index FILE
+Text FASTA index path. Default: <contigs>.bait2contig.fai.
+
+--rebuild-contig-index
+Rebuild the contig FASTA index even when it appears current.
+
+--index-threads INT
+Threads for building plain FASTA indexes. Use 0 for automatic selection.
+Default: 0.
+
+--no-contig-index
+Disable contig indexing and read contigs directly when needed.
+
 Contig extraction arguments:
 --extract-contigs FILE
 Write matched contig sequences to this FASTA file.
@@ -277,7 +291,7 @@ Log file. Default: <actual_out>.log.
 
 Runtime and logging arguments:
 --monitor-interval INT
-Interval in seconds for recording CPU and memory usage. Default: 30.
+Interval in seconds for sampling CPU and memory usage. Default: 30.
 
 --no-color
 Disable colored terminal output.
@@ -286,7 +300,7 @@ Disable colored terminal output.
 Only show warnings and errors on screen.
 
 --verbose
-Show detailed logs on screen.
+Show detailed logs, including periodic resource snapshots.
 
 Important:
 
@@ -448,6 +462,21 @@ ctg_id should be:
 contig_001
 
 The tool should read contig lengths from the actual sequence length, not rely only on header length fields.
+
+By default, search should not load all contig sequences into Python memory before minimap2. It should use a plain-text FASTA index for contig metadata and plain-FASTA sequence offsets.
+
+Index path default:
+
+<contigs>.bait2contig.fai
+
+The index should be considered current only when these values match the source FASTA:
+
+* index schema version
+* absolute source path
+* source file size
+* source file mtime in nanoseconds
+
+The index should not store full sequences. For plain FASTA, index building should use a mmap-based chunk scanner and may use multiple threads. Sequence extraction should seek to indexed offsets and read only requested contigs. For gzip FASTA, metadata can be indexed, but index building is sequential and sequence extraction may fall back to stream-based subset reading because gzip is not efficiently seekable.
 
 ---
 
@@ -1231,10 +1260,11 @@ Requirements:
 2. If psutil is not installed, do not fail.
 3. Fall back to standard-library `resource` and Linux `/proc` child CPU sampling when available.
 4. Try to include minimap2 child process resource usage.
-5. Every --monitor-interval seconds, write a timestamped resource line to the log.
-6. Resource monitoring failure must not fail the main program.
+5. Every --monitor-interval seconds, sample resource usage for final summary statistics.
+6. Only when --verbose is set, write timestamped periodic resource lines to the log.
+7. Resource monitoring failure must not fail the main program.
 
-Resource log example:
+Verbose resource log example:
 
 [RESOURCE] elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
 [RESOURCE] elapsed=60.0s rss_mb=1189.3 cpu_percent=1732.8
@@ -1265,11 +1295,11 @@ Screen logs may use color. Log file must never contain ANSI color codes.
 
 Default screen style:
 
-[INFO]     message
-[WARN]     message
-[ERROR]    message
-[DONE]     message
-[RESOURCE] message
+2026-06-12 09:30:00 [INFO]     message
+2026-06-12 09:30:00 [WARN]     message
+2026-06-12 09:30:00 [ERROR]    message
+2026-06-12 09:30:00 [DONE]     message
+2026-06-12 09:30:00 [RESOURCE] message
 
 Suggested colors:
 INFO: cyan or normal
@@ -1283,31 +1313,30 @@ Requirements:
 1. If stderr is not a TTY, automatically disable color.
 2. If --no-color is specified, disable color.
 3. Log file is always plain text.
-4. Do not depend on rich, loguru, or other heavy logging dependencies.
-5. Simple ANSI escape codes are acceptable.
-6. Logs must remain grep-friendly and machine-parseable.
+4. Rich may be used for terminal rendering.
+5. Logs must remain grep-friendly and machine-parseable.
 
 Example search log:
 
-[INFO]     bait2contig version: 0.1.0
-[INFO]     command: search
-[INFO]     output: bait2contig.hits.tsv.gz
-[INFO]     log: bait2contig.hits.tsv.gz.log
-[INFO]     resume: disabled
-[INFO]     rerun: disabled
-2026-06-12T09:29:00+08:00 [INFO]     loading FASTA inputs
-2026-06-12T09:29:42+08:00 [INFO]     loaded bait sequences: 100
-2026-06-12T09:29:42+08:00 [INFO]     loaded contigs: 5321
-2026-06-12T09:30:00+08:00 [INFO]     running minimap2
-2026-06-12T09:30:30+08:00 [RESOURCE] stage=running_minimap2 elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
-2026-06-12T09:35:00+08:00 [INFO]     parsing PAF
-2026-06-12T09:35:01+08:00 [INFO]     raw alignments: 284
-2026-06-12T09:35:01+08:00 [INFO]     kept alignments: 42
-2026-06-12T09:35:02+08:00 [DONE]     wrote output: bait2contig.hits.tsv.gz
-2026-06-12T09:35:02+08:00 [DONE]     bait2contig search completed successfully
-2026-06-12T09:35:02+08:00 [DONE]     runtime: 312.54 sec
-2026-06-12T09:35:02+08:00 [DONE]     peak RSS: 1234.56 MB
-2026-06-12T09:35:02+08:00 [DONE]     mean CPU: 632.4%
+2026-06-12 09:29:00 [INFO]     bait2contig version: 0.1.0
+2026-06-12 09:29:00 [INFO]     command: search
+2026-06-12 09:29:00 [INFO]     output: bait2contig.hits.tsv.gz
+2026-06-12 09:29:00 [INFO]     log: bait2contig.hits.tsv.gz.log
+2026-06-12 09:29:00 [INFO]     resume: disabled
+2026-06-12 09:29:00 [INFO]     rerun: disabled
+2026-06-12 09:29:00 [INFO]     loading bait FASTA
+2026-06-12 09:29:42 [INFO]     loaded bait sequences: 100
+2026-06-12 09:30:00 [INFO]     running minimap2
+2026-06-12 09:35:00 [INFO]     parsing PAF
+2026-06-12 09:35:00 [INFO]     using contig FASTA index: contigs.fa.bait2contig.fai
+2026-06-12 09:35:01 [INFO]     indexed contig records used: 42
+2026-06-12 09:35:01 [INFO]     raw alignments: 284
+2026-06-12 09:35:01 [INFO]     kept alignments: 42
+2026-06-12 09:35:02 [DONE]     wrote output: bait2contig.hits.tsv.gz
+2026-06-12 09:35:02 [DONE]     bait2contig search completed successfully
+2026-06-12 09:35:02 [DONE]     runtime: 312.54 sec
+2026-06-12 09:35:02 [DONE]     peak RSS: 1234.56 MB
+2026-06-12 09:35:02 [DONE]     mean CPU: 632.4%
 
 ============================================================
 20. Help message style
@@ -1346,7 +1375,7 @@ Write a clear README in English.
 Include:
 
 1. What bait2contig does.
-2. Installation.
+2. Installation, including direct `pip install git+https://...` and a `gh repo clone` local install/update fallback.
 3. minimap2 dependency.
 4. Quick start.
 5. `bait2contig search`.

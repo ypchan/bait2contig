@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -23,6 +22,13 @@ from rich.progress import (
 )
 
 from . import __version__
+from .fasta_index import (
+    FastaIndex,
+    build_fasta_index,
+    default_index_path,
+    index_is_current,
+    read_fasta_subset,
+)
 from .io import (
     FastaRecord,
     PafHit,
@@ -130,7 +136,7 @@ def select_best_per_bait(hits: Iterable[SearchHit]) -> List[SearchHit]:
 def annotate_paf_hits(
     paf_hits: Iterable[PafHit],
     *,
-    contigs: Dict[str, FastaRecord],
+    contigs: Dict[str, object],
     lineage: Optional[Dict[str, str]] = None,
     circular_ids: Optional[set[str]] = None,
 ) -> List[SearchHit]:
@@ -351,6 +357,11 @@ def build_search_params(args, actual_out: str, actual_extract: Optional[str], mi
         "preset": args.preset,
         "threads": args.threads,
         "minimap2_version": minimap2_version_value,
+        "contig_index": abs_or_na(
+            None if args.no_contig_index else (args.contig_index or default_index_path(args.contigs))
+        ),
+        "no_contig_index": bool(args.no_contig_index),
+        "index_threads": args.index_threads,
         "extract_contigs": abs_or_na(actual_extract),
         "extract_mode": args.extract_mode,
         "extract_min_identity": args.extract_min_identity,
@@ -378,6 +389,8 @@ def search_resume_params(start_params: dict[str, object]) -> dict[str, object]:
         "terminal_tolerance",
         "preset",
         "minimap2_version",
+        "contig_index",
+        "no_contig_index",
         "extract_contigs",
         "extract_mode",
         "extract_min_identity",
@@ -404,6 +417,12 @@ def validate_search_args(args) -> None:
     validate_output_path(args.out, "--out")
     validate_output_path(args.extract_contigs, "--extract-contigs")
     validate_output_path(args.log, "--log")
+    if args.no_contig_index and (args.contig_index or args.rebuild_contig_index):
+        raise SearchError("--no-contig-index cannot be used with --contig-index or --rebuild-contig-index.")
+    if not args.no_contig_index:
+        validate_output_path(args.contig_index or default_index_path(args.contigs), "--contig-index")
+    if args.index_threads < 0:
+        raise SearchError("--index-threads must be at least 0")
     if args.tmp_dir and Path(args.tmp_dir).exists() and not Path(args.tmp_dir).is_dir():
         raise SearchError(f"--tmp-dir must be a directory: {args.tmp_dir}")
     for label in ("identity", "coverage"):
@@ -545,48 +564,80 @@ def make_fasta_progress(logger: Logger) -> Progress:
     )
 
 
-def load_fasta_inputs(
-    args,
+def load_fasta_file(
+    path: str,
     *,
+    description: str,
     logger: Logger,
-    monitor: ResourceMonitor,
-) -> tuple[Dict[str, FastaRecord], Dict[str, FastaRecord]]:
-    """Read bait and contig FASTA inputs with progress and parallel file loading."""
-
-    monitor.set_stage("loading_fasta_inputs")
-    logger.info("loading FASTA inputs")
-    inputs = {
-        "bait": args.bait,
-        "contigs": args.contigs,
-    }
-    results: dict[str, Dict[str, FastaRecord]] = {}
+) -> Dict[str, FastaRecord]:
+    """Read one FASTA file with optional Rich progress."""
 
     with make_fasta_progress(logger) as progress:
-        trackers: dict[str, FastaProgressTracker] = {}
-        for name, path in inputs.items():
-            total = fasta_progress_total(path)
+        total = fasta_progress_total(path)
+        task_id = progress.add_task(
+            description,
+            total=total,
+            records="0",
+            bases="0 bp",
+        )
+        tracker = FastaProgressTracker(progress, task_id, total)
+        try:
+            return read_fasta(path, progress=tracker)
+        finally:
+            tracker.flush()
+
+
+def load_bait_fasta(args, *, logger: Logger, monitor: ResourceMonitor) -> Dict[str, FastaRecord]:
+    monitor.set_stage("loading_bait_fasta")
+    logger.info("loading bait FASTA")
+    return load_fasta_file(args.bait, description="bait FASTA", logger=logger)
+
+
+def load_contigs_into_memory(args, *, logger: Logger, monitor: ResourceMonitor) -> Dict[str, FastaRecord]:
+    monitor.set_stage("loading_contigs_fasta")
+    logger.warn("contig index disabled; loading contig FASTA into memory.")
+    return load_fasta_file(args.contigs, description="contigs FASTA", logger=logger)
+
+
+def resolve_contig_index_path(args) -> str:
+    return args.contig_index or default_index_path(args.contigs)
+
+
+def resolve_index_threads(args) -> int:
+    if args.index_threads > 0:
+        return args.index_threads
+    return max(1, min(8, os.cpu_count() or 1))
+
+
+def ensure_contig_index(args, *, logger: Logger, monitor: ResourceMonitor) -> FastaIndex:
+    index_path = resolve_contig_index_path(args)
+    if args.rebuild_contig_index or not index_is_current(index_path, args.contigs):
+        monitor.set_stage("building_contig_index")
+        index_threads = resolve_index_threads(args)
+        logger.info(f"building contig FASTA index: {index_path}")
+        logger.info(f"contig index threads: {index_threads}")
+        with make_fasta_progress(logger) as progress:
+            total = fasta_progress_total(args.contigs)
             task_id = progress.add_task(
-                f"{name} FASTA",
+                "contig index",
                 total=total,
                 records="0",
                 bases="0 bp",
             )
-            trackers[name] = FastaProgressTracker(progress, task_id, total)
-
-        def read_one(name: str, path: str) -> tuple[str, Dict[str, FastaRecord]]:
-            tracker = trackers[name]
+            tracker = FastaProgressTracker(progress, task_id, total)
             try:
-                return name, read_fasta(path, progress=tracker)
+                record_count = build_fasta_index(
+                    args.contigs,
+                    index_path,
+                    progress=tracker,
+                    threads=index_threads,
+                )
             finally:
                 tracker.flush()
-
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="bait2contig-fasta") as executor:
-            futures = [executor.submit(read_one, name, path) for name, path in inputs.items()]
-            for future in as_completed(futures):
-                name, records = future.result()
-                results[name] = records
-
-    return results["bait"], results["contigs"]
+        logger.info(f"indexed contig records: {record_count:,}")
+    else:
+        logger.info(f"using contig FASTA index: {index_path}")
+    return FastaIndex(args.contigs, index_path)
 
 
 def run_search(args) -> int:
@@ -643,6 +694,8 @@ def run_search(args) -> int:
     extracted_count = 0
     extract_output_size = 0
     tmp_paf: Optional[str] = None
+    contig_index: Optional[FastaIndex] = None
+    contigs: Dict[str, FastaRecord] = {}
     start_params = initial_params
     try:
         logger.info(f"bait2contig version: {__version__}")
@@ -658,9 +711,8 @@ def run_search(args) -> int:
         if executable is None:
             raise SearchError("minimap2 was not found. Please install minimap2 or provide its path with --minimap2.")
 
-        bait, contigs = load_fasta_inputs(args, logger=logger, monitor=monitor)
+        bait = load_bait_fasta(args, logger=logger, monitor=monitor)
         logger.info(f"loaded bait sequences: {len(bait)}")
-        logger.info(f"loaded contigs: {len(contigs)}")
 
         monitor.set_stage("loading_annotations")
         lineage = read_lineage(args.lineage) if args.lineage else None
@@ -688,7 +740,19 @@ def run_search(args) -> int:
         paf_hits = parse_paf(tmp_paf)
         raw_alignment_count = len(paf_hits)
         monitor.set_stage("filtering_hits")
-        all_hits = annotate_paf_hits(paf_hits, contigs=contigs, lineage=lineage, circular_ids=circular_ids)
+        hit_contig_ids = [hit.ctg_id for hit in paf_hits]
+        contig_info: dict[str, object] = {}
+        if hit_contig_ids and (circular_ids is None or actual_extract):
+            if args.no_contig_index:
+                contigs = load_contigs_into_memory(args, logger=logger, monitor=monitor)
+                contig_info = contigs
+                logger.info(f"loaded contigs: {len(contigs)}")
+            else:
+                contig_index = ensure_contig_index(args, logger=logger, monitor=monitor)
+                contig_info = contig_index.get_info(hit_contig_ids)
+                logger.info(f"indexed contig records used: {len(contig_info):,}")
+            monitor.set_stage("filtering_hits")
+        all_hits = annotate_paf_hits(paf_hits, contigs=contig_info, lineage=lineage, circular_ids=circular_ids)
         kept_hits = filter_hits(
             all_hits,
             identity=args.identity,
@@ -726,6 +790,19 @@ def run_search(args) -> int:
                 terminal_filter=args.terminal_filter,
                 terminal_tolerance=args.terminal_tolerance,
             )
+            if not args.no_contig_index:
+                if extraction_hits and contig_index is None:
+                    contig_index = ensure_contig_index(args, logger=logger, monitor=monitor)
+                if contig_index is not None:
+                    extract_ids = [hit.ctg_id for hit in extraction_hits]
+                    contigs = contig_index.get_fasta_records(extract_ids)
+                    missing_ids = sorted(set(extract_ids) - set(contigs))
+                    if missing_ids:
+                        logger.warn(
+                            "falling back to streaming contig FASTA for sequence extraction "
+                            f"because random access is unavailable for {len(missing_ids):,} contig(s)."
+                        )
+                        contigs.update(read_fasta_subset(args.contigs, missing_ids))
             extracted_count = extract_contigs(
                 extraction_hits,
                 contigs,
@@ -767,11 +844,16 @@ def run_search(args) -> int:
         logger.done(f"runtime: {runtime:.2f} sec")
         logger.done(f"peak RSS: {format_metric(stats['peak_rss_mb'], digits=2)} MB")
         logger.done(f"mean CPU: {format_metric(stats['mean_cpu_percent'], digits=1)}%")
+        if contig_index is not None:
+            contig_index.close()
+            contig_index = None
         logger.close()
         return 0
     except Exception as exc:
         if tmp_paf:
             Path(tmp_paf).unlink(missing_ok=True)
+        if contig_index is not None:
+            contig_index.close()
         stats = monitor.stop()
         runtime = time.time() - start_time
         message = str(exc)

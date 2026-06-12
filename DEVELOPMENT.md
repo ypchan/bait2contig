@@ -9,6 +9,7 @@ This document records implementation details that are easy to forget when mainta
 - The package intentionally has a shallow source tree:
   - `bait2contig/cli.py`
   - `bait2contig/core.py`
+  - `bait2contig/fasta_index.py`
   - `bait2contig/io.py`
   - `bait2contig/log.py`
   - `bait2contig/summary.py`
@@ -39,6 +40,13 @@ This document records implementation details that are easy to forget when mainta
 - Handles optional kept PAF output.
 - Handles optional contig extraction.
 - Writes search START, DONE, and FAILED log marker blocks.
+
+`bait2contig/fasta_index.py`
+
+- Builds and validates text FASTA indexes for large contig FASTA files.
+- Stores contig IDs, headers, lengths, circularity, and plain-FASTA sequence offsets.
+- Fetches only requested contig sequences for extraction.
+- Falls back to stream-based subset reading when random access is unavailable.
 
 `bait2contig/io.py`
 
@@ -77,8 +85,9 @@ This document records implementation details that are easy to forget when mainta
    - output path sanity
 3. Actual output paths are resolved with `gzip_output_path()`.
 4. Resume checks run before recomputation when `--resume` is used.
-5. FASTA, lineage, and circular-list inputs are loaded.
-6. minimap2 is executed as:
+5. Bait FASTA, lineage, and circular-list inputs are loaded.
+6. The contig FASTA is not loaded into memory by default.
+7. minimap2 is executed as:
 
    ```bash
    minimap2 -x {preset} -t {threads} {contigs} {bait} > {tmp_paf}
@@ -89,17 +98,18 @@ This document records implementation details that are easy to forget when mainta
    - query ID is `bait_id`
    - target ID is `ctg_id`
 
-7. PAF hits are parsed into `PafHit`.
-8. PAF hits are converted into `SearchHit`.
-9. Hits are filtered by:
+8. PAF hits are parsed into `PafHit`.
+9. If contig metadata or sequences are needed, a text contig FASTA index is reused or built.
+10. PAF hits are converted into `SearchHit`.
+11. Hits are filtered by:
    - identity
    - bait coverage
    - alignment length
    - partial-hit terminal placement, unless disabled
-10. If `--best-only` is set, only one best contig per bait is retained.
-11. The hit TSV is written even when no hit passes filters.
-12. Optional contig extraction runs from the annotated hit list.
-13. DONE or FAILED marker blocks are written to the plain-text log.
+12. If `--best-only` is set, only one best contig per bait is retained.
+13. The hit TSV is written even when no hit passes filters.
+14. Optional contig extraction runs from the annotated hit list.
+15. DONE or FAILED marker blocks are written to the plain-text log.
 
 ## PAF-Derived Metrics
 
@@ -227,6 +237,27 @@ If `--extract-include-lineage` is used, append:
 
 `--extract-include-lineage` requires `--extract-rename`.
 
+## Contig FASTA Index
+
+The index is enabled by default for `search`.
+
+Default index path:
+
+```text
+<contigs>.bait2contig.fai
+```
+
+Index validity is based on:
+
+- absolute contig FASTA path
+- file size
+- file mtime in nanoseconds
+- index schema version
+
+For plain FASTA, the index stores sequence offsets, so extraction can seek directly to hit contigs. Plain FASTA index building uses mmap chunk scanning and can use multiple threads through `--index-threads`. For gzip FASTA, the index stores metadata but index building remains sequential and sequence extraction may need stream-based subset reading because gzip is not efficiently seekable.
+
+The index intentionally does not store full sequences. It is a plain-text TSV-like file, not SQLite.
+
 ## Gzip Rules
 
 `open_text(path, mode)` is the single helper for plain and gzip text IO.
@@ -291,7 +322,8 @@ Resource monitoring behavior:
 - Prefer `psutil` for detailed process and child-process CPU/RSS monitoring.
 - Fall back to standard-library `resource` plus Linux `/proc` child CPU sampling when available.
 - Attempt to include child process usage for minimap2.
-- Include the current workflow stage in periodic resource logs.
+- Sample resource usage periodically for final DONE or FAILED summary metrics.
+- Write periodic `[RESOURCE]` lines only when `--verbose` is enabled.
 - Resource monitoring failures must not fail the main command.
 - CPU percent can exceed 100 because minimap2 is multithreaded.
 

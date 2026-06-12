@@ -229,6 +229,30 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
     mapping.add_argument("--keep-paf", action="store_true", help="Keep intermediate PAF output.")
     mapping.add_argument("--tmp-dir", metavar="DIR", help="Temporary directory.")
 
+    index = parser.add_argument_group("Contig index arguments")
+    index.add_argument(
+        "--contig-index",
+        metavar="FILE",
+        help="Text FASTA index path. Default: <contigs>.bait2contig.fai.",
+    )
+    index.add_argument(
+        "--rebuild-contig-index",
+        action="store_true",
+        help="Rebuild the contig FASTA index even when it appears current.",
+    )
+    index.add_argument(
+        "--index-threads",
+        type=int,
+        default=0,
+        metavar="INT",
+        help="Threads for building plain FASTA indexes. Use 0 for automatic selection.",
+    )
+    index.add_argument(
+        "--no-contig-index",
+        action="store_true",
+        help="Disable contig indexing and read contigs directly when needed.",
+    )
+
     extraction = parser.add_argument_group("Contig extraction arguments")
     extraction.add_argument("--extract-contigs", metavar="FILE", help="Write matched contig sequences to this FASTA.")
     extraction.add_argument(
@@ -289,11 +313,11 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=30,
         metavar="INT",
-        help="Interval in seconds for recording CPU and memory usage.",
+        help="Interval in seconds for sampling CPU and memory usage.",
     )
     runtime.add_argument("--no-color", action="store_true", help="Disable colored terminal output.")
     runtime.add_argument("--quiet", action="store_true", help="Only show warnings and errors on screen.")
-    runtime.add_argument("--verbose", action="store_true", help="Show detailed logs on screen.")
+    runtime.add_argument("--verbose", action="store_true", help="Show detailed logs, including periodic resource snapshots.")
 
 
 def add_summarize_arguments(parser: argparse.ArgumentParser) -> None:
@@ -324,11 +348,11 @@ def add_summarize_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=30,
         metavar="INT",
-        help="Interval in seconds for recording CPU and memory usage.",
+        help="Interval in seconds for sampling CPU and memory usage.",
     )
     runtime.add_argument("--no-color", action="store_true", help="Disable colored terminal output.")
     runtime.add_argument("--quiet", action="store_true", help="Only show warnings and errors on screen.")
-    runtime.add_argument("--verbose", action="store_true", help="Show detailed logs on screen.")
+    runtime.add_argument("--verbose", action="store_true", help="Show detailed logs, including periodic resource snapshots.")
 
 
 def main(argv: list[str] | None = None) -> int:

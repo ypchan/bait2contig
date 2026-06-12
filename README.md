@@ -47,6 +47,24 @@ pip install git+https://github.com/ypchan/bait2contig.git
 pip install --force-reinstall --no-cache-dir git+https://github.com/ypchan/bait2contig.git
 ```
 
+### From GitHub Clone
+
+If direct `pip install git+https://...` fails because of network, SSL, or pip Git backend issues, clone the repository first and install from the local checkout:
+
+```bash
+gh repo clone ypchan/bait2contig
+cd bait2contig
+python -m pip install -U .
+```
+
+Update an existing clone:
+
+```bash
+cd bait2contig
+git pull
+python -m pip install -U .
+```
+
 ### From Local Directory
 
 **Standard installation:**
@@ -323,6 +341,17 @@ if result.returncode != 0:
 | `--keep-paf` | flag | off | Keep intermediate PAF output |
 | `--tmp-dir DIR` | path | output dir | Temporary PAF directory |
 
+#### Contig Index Arguments
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--contig-index FILE` | path | `<contigs>.bait2contig.fai` | Text FASTA metadata/index file |
+| `--rebuild-contig-index` | flag | off | Rebuild the index even if it matches the contig FASTA |
+| `--index-threads INT` | ≥ 0 | `0` | Threads for building plain FASTA indexes; `0` selects automatically |
+| `--no-contig-index` | flag | off | Disable indexing and read contigs directly when needed |
+
+The index stores contig IDs, lengths, random-access offsets, circularity, and original FASTA headers in a plain-text FAI-like file. It does not copy full contig sequences, so it is much smaller than the FASTA. The first build still scans the contig FASTA once; later runs reuse the index when file size and mtime match. Plain FASTA indexing uses a mmap-based chunk scanner and can use multiple threads; gzip FASTA indexing is sequential because gzip streams are not efficiently splittable.
+
 #### Contig Extraction Arguments
 
 | Option | Type | Default | Description |
@@ -351,10 +380,10 @@ if result.returncode != 0:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--monitor-interval INT` | ≥ 1 | `30` | Seconds between resource log lines |
+| `--monitor-interval INT` | ≥ 1 | `30` | Seconds between CPU and memory samples |
 | `--no-color` | flag | off | Disable colored terminal output |
 | `--quiet` | flag | off | Show only warnings and errors |
-| `--verbose` | flag | off | Show detailed logs |
+| `--verbose` | flag | off | Show detailed logs, including periodic resource snapshots |
 
 ---
 
@@ -753,12 +782,24 @@ bait2contig search \
   --rerun
 ```
 
+### Large Contig FASTA Indexing
+
+For large contig FASTA inputs, `search` no longer loads all contig sequences before running `minimap2`. It loads bait sequences, runs `minimap2`, then looks up only hit contigs through the text FASTA index.
+
+Default index path:
+
+```text
+<contigs>.bait2contig.fai
+```
+
+Use `--contig-index` to place the index on fast local storage, or `--rebuild-contig-index` after manually replacing a FASTA without changing its mtime. Use `--index-threads 16` or a similar value on fast SSD/NVMe storage if the default automatic setting is too conservative. Plain FASTA inputs support fast offset-based sequence extraction. Gzip FASTA inputs can still be used, but sequence extraction may fall back to streaming because gzip is not efficiently seekable.
+
 ### CPU and Memory Monitoring
 
-Resource logs record periodic snapshots:
+Resource monitoring always samples CPU and memory for final summary statistics. Periodic resource snapshot lines are written only with `--verbose`:
 
 ```
-2026-06-12T09:30:00+08:00 [RESOURCE] stage=running_minimap2 elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
+2026-06-12 09:30:00 [RESOURCE] stage=running_minimap2 elapsed=30.0s rss_mb=842.5 cpu_percent=1250.4
 ```
 
 During large FASTA loading, interactive terminals show live progress bars with bytes, sequence counts, and parsed bases. CPU percent may exceed 100 because `minimap2` is multithreaded.
