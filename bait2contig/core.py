@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -356,6 +357,7 @@ def build_search_params(args, actual_out: str, actual_extract: Optional[str], mi
         "terminal_tolerance": args.terminal_tolerance,
         "preset": args.preset,
         "threads": args.threads,
+        "minimap2_jobs": args.minimap2_jobs,
         "minimap2_version": minimap2_version_value,
         "contig_index": abs_or_na(
             None if args.no_contig_index else (args.contig_index or default_index_path(args.contigs))
@@ -441,6 +443,8 @@ def validate_search_args(args) -> None:
         raise SearchError("--extract-min-aln-length must be at least 0")
     if args.threads < 1:
         raise SearchError("--threads must be at least 1")
+    if args.minimap2_jobs < 1:
+        raise SearchError("--minimap2-jobs must be at least 1")
     if args.monitor_interval < 1:
         raise SearchError("--monitor-interval must be at least 1")
 
@@ -456,19 +460,35 @@ def check_existing_outputs(paths: Iterable[Optional[str]], *, resume: bool, reru
             )
 
 
-def run_minimap2(
-    *,
-    executable: str,
-    preset: str,
-    threads: int,
-    contigs: str,
-    bait: str,
-    tmp_paf: str,
-    logger: Logger,
-    monitor: ResourceMonitor,
-) -> None:
-    command = [executable, "-x", preset, "-t", str(threads), contigs, bait]
-    logger.info("running minimap2")
+def distribute_minimap2_threads(total_threads: int, jobs: int) -> list[int]:
+    """Split a total minimap2 thread budget across parallel jobs."""
+
+    total_threads = max(1, int(total_threads))
+    jobs = max(1, min(int(jobs), total_threads))
+    base_threads, extra_threads = divmod(total_threads, jobs)
+    return [base_threads + (1 if index < extra_threads else 0) for index in range(jobs)]
+
+
+def resolve_minimap2_jobs(args, bait_count: int) -> int:
+    return max(1, min(int(args.minimap2_jobs), max(1, bait_count), int(args.threads)))
+
+
+def split_bait_records(records: Sequence[FastaRecord], jobs: int) -> list[list[FastaRecord]]:
+    if not records:
+        return []
+    jobs = max(1, min(int(jobs), len(records)))
+    chunk_size = (len(records) + jobs - 1) // jobs
+    return [list(records[start : start + chunk_size]) for start in range(0, len(records), chunk_size)]
+
+
+def make_tmp_fasta(tmp_dir: str | Path) -> str:
+    Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="bait2contig.bait.", suffix=".fa", dir=str(tmp_dir))
+    os.close(fd)
+    return path
+
+
+def execute_minimap2_command(command: list[str], tmp_paf: str, monitor: ResourceMonitor) -> tuple[int, str]:
     with open(tmp_paf, "wt", encoding="utf-8", newline="") as paf_handle:
         process = subprocess.Popen(
             command,
@@ -478,12 +498,117 @@ def run_minimap2(
         )
         monitor.set_child_pid(process.pid)
         _, stderr = process.communicate()
-    if stderr:
-        for line in stderr.splitlines():
-            if line.strip() and logger.verbose:
-                logger.info(f"minimap2: {line.strip()}")
-    if process.returncode != 0:
-        raise SearchError(f"minimap2 failed with exit code {process.returncode}")
+    return process.returncode, stderr or ""
+
+
+def log_minimap2_stderr(stderr: str, logger: Logger, *, prefix: str = "minimap2") -> None:
+    if not stderr:
+        return
+    for line in stderr.splitlines():
+        if line.strip() and logger.verbose:
+            logger.info(f"{prefix}: {line.strip()}")
+
+
+def run_single_minimap2_command(
+    *,
+    command: list[str],
+    tmp_paf: str,
+    logger: Logger,
+    monitor: ResourceMonitor,
+    prefix: str = "minimap2",
+) -> None:
+    returncode, stderr = execute_minimap2_command(command, tmp_paf, monitor)
+    log_minimap2_stderr(stderr, logger, prefix=prefix)
+    if returncode != 0:
+        raise SearchError(f"{prefix} failed with exit code {returncode}")
+
+
+def run_parallel_minimap2(
+    *,
+    executable: str,
+    preset: str,
+    total_threads: int,
+    jobs: int,
+    contigs: str,
+    bait_records: Sequence[FastaRecord],
+    tmp_paf: str,
+    tmp_dir: str | Path,
+    logger: Logger,
+    monitor: ResourceMonitor,
+) -> None:
+    chunks = split_bait_records(bait_records, jobs)
+    thread_counts = distribute_minimap2_threads(total_threads, len(chunks))
+    bait_paths: list[str] = []
+    paf_paths: list[str] = []
+    try:
+        for chunk in chunks:
+            bait_path = make_tmp_fasta(tmp_dir)
+            paf_path = make_tmp_paf(tmp_dir)
+            write_fasta(((record.header, record.sequence) for record in chunk), bait_path)
+            bait_paths.append(bait_path)
+            paf_paths.append(paf_path)
+
+        logger.info(f"minimap2 jobs: {len(chunks)}")
+        logger.info(f"minimap2 threads per job: {','.join(str(count) for count in thread_counts)}")
+        futures = {}
+        with ThreadPoolExecutor(max_workers=len(chunks), thread_name_prefix="bait2contig-minimap2") as executor:
+            for index, (bait_path, paf_path, thread_count) in enumerate(zip(bait_paths, paf_paths, thread_counts), start=1):
+                command = [executable, "-x", preset, "-t", str(thread_count), contigs, bait_path]
+                futures[executor.submit(execute_minimap2_command, command, paf_path, monitor)] = index
+            results: dict[int, tuple[int, str]] = {}
+            for future in as_completed(futures):
+                index = futures[future]
+                results[index] = future.result()
+
+        for index in range(1, len(chunks) + 1):
+            returncode, stderr = results[index]
+            prefix = f"minimap2 job {index}"
+            log_minimap2_stderr(stderr, logger, prefix=prefix)
+            if returncode != 0:
+                raise SearchError(f"{prefix} failed with exit code {returncode}")
+
+        with open(tmp_paf, "wt", encoding="utf-8", newline="") as out_handle:
+            for paf_path in paf_paths:
+                with open(paf_path, "rt", encoding="utf-8", newline="") as in_handle:
+                    shutil.copyfileobj(in_handle, out_handle)
+    finally:
+        for path in bait_paths + paf_paths:
+            Path(path).unlink(missing_ok=True)
+
+
+def run_minimap2(
+    *,
+    executable: str,
+    preset: str,
+    threads: int,
+    jobs: int,
+    contigs: str,
+    bait: str,
+    bait_records: Sequence[FastaRecord],
+    tmp_paf: str,
+    tmp_dir: str | Path,
+    logger: Logger,
+    monitor: ResourceMonitor,
+) -> None:
+    command = [executable, "-x", preset, "-t", str(threads), contigs, bait]
+    logger.info("running minimap2")
+    logger.info(f"minimap2 threads: {threads}")
+    if jobs > 1 and len(bait_records) > 1:
+        run_parallel_minimap2(
+            executable=executable,
+            preset=preset,
+            total_threads=threads,
+            jobs=jobs,
+            contigs=contigs,
+            bait_records=bait_records,
+            tmp_paf=tmp_paf,
+            tmp_dir=tmp_dir,
+            logger=logger,
+            monitor=monitor,
+        )
+        return
+    logger.info("minimap2 jobs: 1")
+    run_single_minimap2_command(command=command, tmp_paf=tmp_paf, logger=logger, monitor=monitor)
 
 
 def make_tmp_paf(tmp_dir: str | Path) -> str:
@@ -606,7 +731,7 @@ def resolve_contig_index_path(args) -> str:
 def resolve_index_threads(args) -> int:
     if args.index_threads > 0:
         return args.index_threads
-    return max(1, min(8, os.cpu_count() or 1))
+    return max(1, int(args.threads))
 
 
 def ensure_contig_index(args, *, logger: Logger, monitor: ResourceMonitor) -> FastaIndex:
@@ -724,13 +849,17 @@ def run_search(args) -> int:
 
         tmp_paf = make_tmp_paf(tmp_dir)
         monitor.set_stage("running_minimap2")
+        minimap2_jobs = resolve_minimap2_jobs(args, len(bait))
         run_minimap2(
             executable=executable,
             preset=args.preset,
             threads=args.threads,
+            jobs=minimap2_jobs,
             contigs=args.contigs,
             bait=args.bait,
+            bait_records=list(bait.values()),
             tmp_paf=tmp_paf,
+            tmp_dir=tmp_dir,
             logger=logger,
             monitor=monitor,
         )

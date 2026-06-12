@@ -2,6 +2,7 @@ from bait2contig.fasta_index import (
     FastaIndex,
     build_fasta_index,
     default_index_path,
+    index_scan_ranges,
     index_is_current,
     read_fasta_subset,
 )
@@ -67,3 +68,18 @@ def test_read_fasta_subset(tmp_path):
 
 def test_default_index_path():
     assert default_index_path("contigs.fa") == "contigs.fa.bait2contig.fai"
+
+
+def test_index_scan_ranges_respects_threads():
+    ranges = index_scan_ranges(64 * 1024 * 1024, 8)
+
+    assert len(ranges) == 8
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] == 64 * 1024 * 1024
+    assert all(previous[1] == current[0] for previous, current in zip(ranges, ranges[1:]))
+
+
+def test_index_scan_ranges_does_not_create_empty_ranges():
+    ranges = index_scan_ranges(3, 8)
+
+    assert ranges == [(0, 1), (1, 2), (2, 3)]

@@ -336,7 +336,8 @@ if result.returncode != 0:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--preset STR` | string | `asm10` | minimap2 preset (`-x` flag) |
-| `--threads INT` | ≥ 1 | `8` | Number of minimap2 threads |
+| `--threads INT` | ≥ 1 | `8` | Total minimap2 thread budget |
+| `--minimap2-jobs INT` | ≥ 1 | `1` | Parallel minimap2 processes for splitting bait FASTA; each job receives part of the `--threads` budget |
 | `--minimap2 PATH` | path | `minimap2` | minimap2 executable path |
 | `--keep-paf` | flag | off | Keep intermediate PAF output |
 | `--tmp-dir DIR` | path | output dir | Temporary PAF directory |
@@ -347,10 +348,10 @@ if result.returncode != 0:
 |--------|------|---------|-------------|
 | `--contig-index FILE` | path | `<contigs>.bait2contig.fai` | Text FASTA metadata/index file |
 | `--rebuild-contig-index` | flag | off | Rebuild the index even if it matches the contig FASTA |
-| `--index-threads INT` | ≥ 0 | `0` | Threads for building plain FASTA indexes; `0` selects automatically |
+| `--index-threads INT` | ≥ 0 | `0` | Threads for building plain FASTA indexes; `0` follows `--threads` |
 | `--no-contig-index` | flag | off | Disable indexing and read contigs directly when needed |
 
-The index stores contig IDs, lengths, random-access offsets, circularity, and original FASTA headers in a plain-text FAI-like file. It does not copy full contig sequences, so it is much smaller than the FASTA. The first build still scans the contig FASTA once; later runs reuse the index when file size and mtime match. Plain FASTA indexing uses a mmap-based chunk scanner and can use multiple threads; gzip FASTA indexing is sequential because gzip streams are not efficiently splittable.
+The index stores contig IDs, lengths, random-access offsets, circularity, and original FASTA headers in a plain-text FAI-like file. It does not copy full contig sequences, so it is much smaller than the FASTA. The first build still scans the contig FASTA once; later runs reuse the index when file size and mtime match. Plain FASTA indexing uses a mmap-based chunk scanner and can use multiple threads; by default it follows `--threads`, and `--index-threads` can override it. Gzip FASTA indexing is sequential because gzip streams are not efficiently splittable.
 
 #### Contig Extraction Arguments
 
@@ -792,7 +793,7 @@ Default index path:
 <contigs>.bait2contig.fai
 ```
 
-Use `--contig-index` to place the index on fast local storage, or `--rebuild-contig-index` after manually replacing a FASTA without changing its mtime. Use `--index-threads 16` or a similar value on fast SSD/NVMe storage if the default automatic setting is too conservative. Plain FASTA inputs support fast offset-based sequence extraction. Gzip FASTA inputs can still be used, but sequence extraction may fall back to streaming because gzip is not efficiently seekable.
+Use `--contig-index` to place the index on fast local storage, or `--rebuild-contig-index` after manually replacing a FASTA without changing its mtime. With the default `--index-threads 0`, plain FASTA indexing follows `--threads`; set `--index-threads` explicitly if you want a different index-building thread count. Plain FASTA inputs support fast offset-based sequence extraction. Gzip FASTA inputs can still be used, but sequence extraction may fall back to streaming because gzip is not efficiently seekable.
 
 ### CPU and Memory Monitoring
 
@@ -803,6 +804,8 @@ Resource monitoring always samples CPU and memory for final summary statistics. 
 ```
 
 During large FASTA loading, interactive terminals show live progress bars with bytes, sequence counts, and parsed bases. CPU percent may exceed 100 because `minimap2` is multithreaded.
+
+If `running_minimap2` still uses only one or two cores after `--threads 32`, the bait FASTA may be too small for one minimap2 process to keep all workers busy. Use `--minimap2-jobs` to split bait records across multiple minimap2 processes, for example `--threads 32 --minimap2-jobs 8`. This increases parallelism but can increase memory and I/O because each job scans the contig input.
 
 ### Help Colors
 
@@ -907,6 +910,8 @@ bait2contig search ... --keep-paf
 
 **To improve speed:**
 - Increase `--threads` (e.g., `--threads 32`)
+- If minimap2 underuses CPUs with many bait records, add `--minimap2-jobs 4` or `--minimap2-jobs 8`
+- For first-time plain FASTA indexing, `--index-threads 0` follows `--threads`; gzip FASTA indexing remains sequential
 - Use `--best-only` to stop early per bait
 - Pre-filter contigs if possible (subset input FASTA)
 - Check system resources: `top` or Task Manager

@@ -25,6 +25,23 @@ class HelpFormatter(RichHelpFormatter):
         console = Console(stderr=True, color_system="auto" if self.use_color else None)
         super().__init__(prog, max_help_position=32, width=100, console=console)
 
+    def _get_help_string(self, action) -> str:
+        help_text = action.help or ""
+        if (
+            not help_text
+            or action.required
+            or action.default is argparse.SUPPRESS
+            or "%(default)" in help_text
+            or "default:" in help_text.lower()
+        ):
+            return help_text
+        if isinstance(action, argparse._StoreFalseAction):
+            return help_text
+        if isinstance(action, argparse._StoreTrueAction):
+            return f"{help_text} (default: {'on' if action.default else 'off'})"
+        default = "not set" if action.default is None else "%(default)s"
+        return f"{help_text} (default: {default})"
+
 
 class SmartArgumentParser(argparse.ArgumentParser):
     """ArgumentParser with concise, actionable error messages."""
@@ -205,7 +222,7 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-terminal-filter",
         dest="terminal_filter",
         action="store_false",
-        help="Do not require partial bait alignments to touch bait and contig ends.",
+        help="Do not require partial bait alignments to touch bait and contig ends. Default: terminal filter enabled.",
     )
     filtering.add_argument("--best-only", action="store_true", help="Keep only the best contig for each bait.")
     parser.set_defaults(terminal_filter=True)
@@ -224,10 +241,17 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
 
     mapping = parser.add_argument_group("Mapping arguments")
     mapping.add_argument("--preset", default="asm10", metavar="STR", help="Minimap2 preset.")
-    mapping.add_argument("--threads", type=int, default=8, metavar="INT", help="Number of threads.")
+    mapping.add_argument("--threads", type=int, default=8, metavar="INT", help="Total minimap2 thread budget.")
+    mapping.add_argument(
+        "--minimap2-jobs",
+        type=int,
+        default=1,
+        metavar="INT",
+        help="Parallel minimap2 processes for splitting bait FASTA.",
+    )
     mapping.add_argument("--minimap2", default="minimap2", metavar="PATH", help="Path to minimap2 executable.")
     mapping.add_argument("--keep-paf", action="store_true", help="Keep intermediate PAF output.")
-    mapping.add_argument("--tmp-dir", metavar="DIR", help="Temporary directory.")
+    mapping.add_argument("--tmp-dir", metavar="DIR", help="Temporary directory. Default: output directory.")
 
     index = parser.add_argument_group("Contig index arguments")
     index.add_argument(
@@ -245,7 +269,7 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         metavar="INT",
-        help="Threads for building plain FASTA indexes. Use 0 for automatic selection.",
+        help="Threads for building plain FASTA indexes. Use 0 to follow --threads.",
     )
     index.add_argument(
         "--no-contig-index",
@@ -266,19 +290,19 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
         "--extract-min-identity",
         type=float,
         metavar="FLOAT",
-        help="Minimum identity for extracted contigs.",
+        help="Minimum identity for extracted contigs. Default: --identity.",
     )
     extraction.add_argument(
         "--extract-min-coverage",
         type=float,
         metavar="FLOAT",
-        help="Minimum bait coverage for extracted contigs.",
+        help="Minimum bait coverage for extracted contigs. Default: --coverage.",
     )
     extraction.add_argument(
         "--extract-min-aln-length",
         type=int,
         metavar="INT",
-        help="Minimum alignment length for extracted contigs.",
+        help="Minimum alignment length for extracted contigs. Default: --min-aln-length.",
     )
     extraction.add_argument(
         "--extract-rename",
@@ -291,7 +315,12 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
         help="Include lineage in renamed FASTA headers.",
     )
     dedup = extraction.add_mutually_exclusive_group()
-    dedup.add_argument("--extract-dedup", dest="extract_dedup", action="store_true", help="Deduplicate extracted contigs.")
+    dedup.add_argument(
+        "--extract-dedup",
+        dest="extract_dedup",
+        action="store_true",
+        help="Deduplicate extracted contigs. Default: enabled.",
+    )
     dedup.add_argument(
         "--no-extract-dedup",
         dest="extract_dedup",
@@ -305,7 +334,7 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
     output.add_argument("--rerun", action="store_true", help="Force rerun even if output and success log exist.")
     output.add_argument("--force", action="store_true", help="Overwrite existing output.")
     output.add_argument("--gzip", action="store_true", help="Compress output TSV, kept PAF, and extracted FASTA outputs.")
-    output.add_argument("--log", metavar="FILE", help="Log file.")
+    output.add_argument("--log", metavar="FILE", help="Log file. Default: <actual_out>.log.")
 
     runtime = parser.add_argument_group("Runtime and logging arguments")
     runtime.add_argument(
@@ -326,9 +355,24 @@ def add_summarize_arguments(parser: argparse.ArgumentParser) -> None:
     required.add_argument("--out", metavar="FILE", required=True, help="Output bait-level summary TSV.")
 
     filtering = parser.add_argument_group("Filtering arguments")
-    filtering.add_argument("--min-identity", type=float, metavar="FLOAT", help="Additional identity filter.")
-    filtering.add_argument("--min-coverage", type=float, metavar="FLOAT", help="Additional bait coverage filter.")
-    filtering.add_argument("--min-aln-length", type=int, metavar="INT", help="Additional alignment length filter.")
+    filtering.add_argument(
+        "--min-identity",
+        type=float,
+        metavar="FLOAT",
+        help="Additional identity filter. Default: no additional filter.",
+    )
+    filtering.add_argument(
+        "--min-coverage",
+        type=float,
+        metavar="FLOAT",
+        help="Additional bait coverage filter. Default: no additional filter.",
+    )
+    filtering.add_argument(
+        "--min-aln-length",
+        type=int,
+        metavar="INT",
+        help="Additional alignment length filter. Default: no additional filter.",
+    )
 
     summary = parser.add_argument_group("Summary arguments")
     summary.add_argument("--best-hit", action="store_true", help="Report the best contig for each bait.")
@@ -340,7 +384,7 @@ def add_summarize_arguments(parser: argparse.ArgumentParser) -> None:
     output.add_argument("--rerun", action="store_true", help="Force rerun even if output and success log exist.")
     output.add_argument("--force", action="store_true", help="Overwrite existing output.")
     output.add_argument("--gzip", action="store_true", help="Compress output TSV when applicable.")
-    output.add_argument("--log", metavar="FILE", help="Log file.")
+    output.add_argument("--log", metavar="FILE", help="Log file. Default: <actual_out>.log.")
 
     runtime = parser.add_argument_group("Runtime and logging arguments")
     runtime.add_argument(

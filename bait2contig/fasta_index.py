@@ -282,7 +282,7 @@ def find_header_starts(
             if progress is not None:
                 progress(end - start, 0, 0)
     else:
-        with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="bait2contig-index") as executor:
+        with ThreadPoolExecutor(max_workers=min(threads, len(ranges)), thread_name_prefix="bait2contig-index") as executor:
             futures = {
                 executor.submit(find_header_starts_in_range, data, start, end): (start, end)
                 for start, end in ranges
@@ -296,9 +296,10 @@ def find_header_starts(
 
 
 def index_scan_ranges(size: int, threads: int) -> list[tuple[int, int]]:
-    chunk_size = 256 * 1024 * 1024
-    if size < chunk_size:
-        return [(0, size)]
+    if size <= 0:
+        return []
+    chunk_count = max(1, min(int(threads), size))
+    chunk_size = (size + chunk_count - 1) // chunk_count
     ranges: list[tuple[int, int]] = []
     for start in range(0, size, chunk_size):
         ranges.append((start, min(size, start + chunk_size)))

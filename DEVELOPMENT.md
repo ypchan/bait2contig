@@ -93,7 +93,7 @@ This document records implementation details that are easy to forget when mainta
    minimap2 -x {preset} -t {threads} {contigs} {bait} > {tmp_paf}
    ```
 
-   This order is required. Contigs are the target/reference and bait sequences are the query. In PAF:
+   This order is required. Contigs are the target/reference and bait sequences are the query. With `--minimap2-jobs > 1`, bait records are split into chunks, minimap2 is run concurrently for each chunk, and PAF chunks are concatenated in chunk order. In PAF:
 
    - query ID is `bait_id`
    - target ID is `ctg_id`
@@ -254,7 +254,7 @@ Index validity is based on:
 - file mtime in nanoseconds
 - index schema version
 
-For plain FASTA, the index stores sequence offsets, so extraction can seek directly to hit contigs. Plain FASTA index building uses mmap chunk scanning and can use multiple threads through `--index-threads`. For gzip FASTA, the index stores metadata but index building remains sequential and sequence extraction may need stream-based subset reading because gzip is not efficiently seekable.
+For plain FASTA, the index stores sequence offsets, so extraction can seek directly to hit contigs. Plain FASTA index building uses mmap chunk scanning and can use multiple threads; with `--index-threads 0`, the index thread budget follows `--threads`, and explicit `--index-threads` overrides it. For gzip FASTA, the index stores metadata but index building remains sequential and sequence extraction may need stream-based subset reading because gzip is not efficiently seekable.
 
 The index intentionally does not store full sequences. It is a plain-text TSV-like file, not SQLite.
 

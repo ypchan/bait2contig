@@ -1,15 +1,23 @@
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from bait2contig.cli import main
 from bait2contig.core import (
     SearchError,
     SearchHit,
+    distribute_minimap2_threads,
     extract_contigs,
     filter_hits,
     is_terminal_partial_hit,
     renamed_header,
+    resolve_index_threads,
+    resolve_minimap2_jobs,
+    run_parallel_minimap2,
     select_best_per_bait,
     select_extraction_hits,
+    split_bait_records,
 )
 from bait2contig.io import FastaRecord, open_text, read_fasta
 from bait2contig.log import DONE_MARKER, FAILED_MARKER, START_MARKER, check_resume, parse_marker_blocks
@@ -187,6 +195,10 @@ def test_extract_include_lineage_requires_rename(tmp_path):
 class FakeLogger:
     def __init__(self):
         self.messages = []
+        self.verbose = False
+
+    def info(self, message):
+        self.messages.append(message)
 
     def warn(self, message):
         self.messages.append(message)
@@ -233,6 +245,85 @@ def test_no_extract_dedup_warning(tmp_path):
         logger=logger,
     )
     assert any("--no-extract-dedup" in message for message in logger.messages)
+
+
+def test_auto_index_threads_follow_mapping_threads():
+    args = SimpleNamespace(index_threads=0, threads=32)
+
+    assert resolve_index_threads(args) == 32
+
+
+def test_explicit_index_threads_override_mapping_threads():
+    args = SimpleNamespace(index_threads=4, threads=32)
+
+    assert resolve_index_threads(args) == 4
+
+
+def test_resolve_minimap2_jobs_caps_to_baits_and_threads():
+    args = SimpleNamespace(minimap2_jobs=64, threads=32)
+
+    assert resolve_minimap2_jobs(args, bait_count=10) == 10
+    assert resolve_minimap2_jobs(args, bait_count=64) == 32
+
+
+def test_distribute_minimap2_threads_uses_total_budget():
+    assert distribute_minimap2_threads(32, 3) == [11, 11, 10]
+    assert distribute_minimap2_threads(2, 8) == [1, 1]
+
+
+def test_split_bait_records_keeps_contiguous_chunks():
+    records = [
+        FastaRecord("b1", "b1", "A"),
+        FastaRecord("b2", "b2", "C"),
+        FastaRecord("b3", "b3", "G"),
+        FastaRecord("b4", "b4", "T"),
+    ]
+
+    chunks = split_bait_records(records, 2)
+
+    assert [[record.id for record in chunk] for chunk in chunks] == [["b1", "b2"], ["b3", "b4"]]
+
+
+def test_run_parallel_minimap2_combines_chunks_in_order(tmp_path, monkeypatch):
+    records = [
+        FastaRecord("b1", "b1", "A"),
+        FastaRecord("b2", "b2", "C"),
+        FastaRecord("b3", "b3", "G"),
+        FastaRecord("b4", "b4", "T"),
+    ]
+    tmp_paf = tmp_path / "combined.paf"
+
+    def fake_execute(command, paf_path, monitor):
+        bait_path = Path(command[-1])
+        headers = [
+            line[1:].strip()
+            for line in bait_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith(">")
+        ]
+        Path(paf_path).write_text("".join(f"{header}\tthreads={command[4]}\n" for header in headers), encoding="utf-8")
+        return 0, ""
+
+    monkeypatch.setattr("bait2contig.core.execute_minimap2_command", fake_execute)
+
+    run_parallel_minimap2(
+        executable="minimap2",
+        preset="asm10",
+        total_threads=4,
+        jobs=2,
+        contigs="contigs.fa",
+        bait_records=records,
+        tmp_paf=str(tmp_paf),
+        tmp_dir=tmp_path,
+        logger=FakeLogger(),
+        monitor=SimpleNamespace(set_child_pid=lambda pid: None),
+    )
+
+    assert tmp_paf.read_text(encoding="utf-8").splitlines() == [
+        "b1\tthreads=2",
+        "b2\tthreads=2",
+        "b3\tthreads=2",
+        "b4\tthreads=2",
+    ]
 
 
 def write_resume_log(path, command, output, params, marker=DONE_MARKER):
@@ -334,6 +425,13 @@ def test_cli_search_help(capsys):
     assert "Required arguments" in output
     assert "Contig extraction arguments" in output
     assert "--terminal-tolerance" in output
+    assert "Minimum alignment identity. (default: 0.97)" in output
+    assert "Total minimap2 thread budget. (default: 8)" in output
+    assert "Parallel minimap2 processes for splitting bait FASTA. (default: 1)" in output
+    assert "Text FASTA index path. Default: <contigs>.bait2contig.fai." in output
+    assert "Threads for building plain FASTA indexes. Use 0 to follow --threads." in output
+    assert "Minimum identity for extracted contigs. Default: --identity." in output
+    assert "Input contig FASTA. (default: None)" not in output
 
 
 def test_cli_summarize_help(capsys):
@@ -343,6 +441,8 @@ def test_cli_summarize_help(capsys):
     output = capsys.readouterr().out
     assert "Summary arguments" in output
     assert "Resume and output arguments" in output
+    assert "Separator for contig lists. (default: ,)" in output
+    assert "Additional identity filter. Default: no additional filter." in output
 
 
 def test_cli_missing_command(capsys):

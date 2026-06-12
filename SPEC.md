@@ -215,7 +215,11 @@ Mapping arguments:
 Minimap2 preset. Default: asm10.
 
 --threads INT
-Number of threads. Default: 8.
+Total minimap2 thread budget. Default: 8.
+
+--minimap2-jobs INT
+Parallel minimap2 processes for splitting bait FASTA. Each job receives part of the --threads budget.
+Default: 1.
 
 --minimap2 PATH
 Path to minimap2 executable. Default: minimap2.
@@ -234,7 +238,7 @@ Text FASTA index path. Default: <contigs>.bait2contig.fai.
 Rebuild the contig FASTA index even when it appears current.
 
 --index-threads INT
-Threads for building plain FASTA indexes. Use 0 for automatic selection.
+Threads for building plain FASTA indexes. Use 0 to follow --threads.
 Default: 0.
 
 --no-contig-index
@@ -316,6 +320,8 @@ Important:
 The internal minimap2 command should be:
 
 minimap2 -x {preset} -t {threads} {contigs} {bait} > {tmp_paf}
+
+If --minimap2-jobs is greater than 1, split bait records into chunks, cap the actual job count to the bait count and total thread budget, run minimap2 jobs concurrently, then concatenate PAF chunks in chunk order. This mode is intended for cases where one minimap2 process cannot keep the requested threads busy.
 
 The order is important:
 
@@ -476,7 +482,7 @@ The index should be considered current only when these values match the source F
 * source file size
 * source file mtime in nanoseconds
 
-The index should not store full sequences. For plain FASTA, index building should use a mmap-based chunk scanner and may use multiple threads. Sequence extraction should seek to indexed offsets and read only requested contigs. For gzip FASTA, metadata can be indexed, but index building is sequential and sequence extraction may fall back to stream-based subset reading because gzip is not efficiently seekable.
+The index should not store full sequences. For plain FASTA, index building should use a mmap-based chunk scanner and may use multiple threads by splitting the scan according to the index thread budget. Sequence extraction should seek to indexed offsets and read only requested contigs. For gzip FASTA, metadata can be indexed, but index building is sequential and sequence extraction may fall back to stream-based subset reading because gzip is not efficiently seekable.
 
 ---
 
