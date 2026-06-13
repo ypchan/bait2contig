@@ -4,7 +4,7 @@
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A lightweight, high-performance command-line tool for finding contigs that match bait or reference sequences under user-defined identity and bait-coverage thresholds. `bait2contig` maps bait sequences to contig FASTAs using `minimap2`, parses PAF output, writes hit-level TSV reports, and can summarize contigs anchored by each bait.
+A lightweight, high-performance command-line tool for finding contigs that match bait or reference sequences under user-defined identity and bait-coverage thresholds. `bait2contig` maps contigs against bait/reference sequences using `minimap2`, parses PAF output, writes hit-level TSV reports, and can summarize contigs anchored by each bait.
 
 **Typical applications:** Full-length 16S rRNA sequences, ITS sequences, marker genes, MAG markers, viral markers, and custom reference sequences.
 
@@ -105,10 +105,17 @@ bait2contig search --minimap2 /path/to/minimap2 --contigs contigs.fa --bait bait
 **Mapping command used internally:**
 
 ```bash
-minimap2 -x {preset} -t {threads} {contigs} {bait} > {tmp_paf}
+minimap2 -x {preset} -t {threads} {bait_or_bait_index} {contigs} > {tmp_paf}
 ```
 
-> **Note:** Query IDs are bait IDs; target IDs are contig IDs.
+> **Note:** Query IDs are contig IDs; target IDs are bait/reference IDs.
+
+For large reusable bait/reference databases, prebuild a minimap2 index and pass it with `--bait-index`:
+
+```bash
+minimap2 -d bait.mmi bait.fa
+bait2contig search --bait bait.fa --bait-index bait.mmi --contigs contigs.fa --out bait2contig.hits.tsv
+```
 
 ### System Requirements
 
@@ -337,7 +344,8 @@ if result.returncode != 0:
 |--------|------|---------|-------------|
 | `--preset STR` | string | `asm10` | minimap2 preset (`-x` flag) |
 | `--threads INT` | ≥ 1 | `8` | Total minimap2 thread budget |
-| `--minimap2-jobs INT` | ≥ 1 | `1` | Parallel minimap2 processes for splitting bait FASTA; each job receives part of the `--threads` budget |
+| `--minimap2-jobs INT` | ≥ 1 | `1` | Parallel minimap2 processes for splitting bait FASTA when `--bait-index` is not used; each job receives part of the `--threads` budget |
+| `--bait-index FILE` | path | not set | Optional prebuilt minimap2 index for bait/reference FASTA |
 | `--minimap2 PATH` | path | `minimap2` | minimap2 executable path |
 | `--keep-paf` | flag | off | Keep intermediate PAF output |
 | `--tmp-dir DIR` | path | output dir | Temporary PAF directory |
@@ -586,8 +594,10 @@ cov_bait = aligned_bait_length / bait_length
 More explicitly:
 
 ```
-cov_bait = (query_end - query_start) / query_len
+cov_bait = (target_end - target_start) / target_len
 ```
+
+With the current minimap2 orientation, contigs are PAF queries and bait/reference sequences are PAF targets.
 
 **Filtering logic:**
 - `identity >= --identity`
@@ -785,7 +795,7 @@ bait2contig search \
 
 ### Large Contig FASTA Indexing
 
-For large contig FASTA inputs, `search` no longer loads all contig sequences before running `minimap2`. It loads bait sequences, runs `minimap2`, then looks up only hit contigs through the text FASTA index.
+For large contig FASTA inputs, `search` does not load all contig sequences before running `minimap2`. It maps contigs as queries against bait/reference targets, then looks up only hit contig metadata or sequences through the text FASTA index when needed.
 
 Default index path:
 
@@ -805,7 +815,7 @@ Resource monitoring always samples CPU and memory for final summary statistics. 
 
 During large FASTA loading, interactive terminals show live progress bars with bytes, sequence counts, and parsed bases. CPU percent may exceed 100 because `minimap2` is multithreaded.
 
-If `running_minimap2` still uses only one or two cores after `--threads 32`, the bait FASTA may be too small for one minimap2 process to keep all workers busy. Use `--minimap2-jobs` to split bait records across multiple minimap2 processes, for example `--threads 32 --minimap2-jobs 8`. This increases parallelism but can increase memory and I/O because each job scans the contig input.
+If the same bait/reference database is reused across many runs, build a minimap2 index once with `minimap2 -d bait.mmi bait.fa` and pass `--bait-index bait.mmi`. If `running_minimap2` still uses only one or two cores after `--threads 32` and no bait index is used, `--minimap2-jobs` can split bait records across multiple minimap2 processes, but it increases memory and I/O because each job scans the contig input.
 
 ### Help Colors
 
@@ -910,7 +920,8 @@ bait2contig search ... --keep-paf
 
 **To improve speed:**
 - Increase `--threads` (e.g., `--threads 32`)
-- If minimap2 underuses CPUs with many bait records, add `--minimap2-jobs 4` or `--minimap2-jobs 8`
+- Reuse a prebuilt bait/reference minimap2 index with `--bait-index`
+- If minimap2 underuses CPUs and no bait index is used, try `--minimap2-jobs 4` or `--minimap2-jobs 8`
 - For first-time plain FASTA indexing, `--index-threads 0` follows `--threads`; gzip FASTA indexing remains sequential
 - Use `--best-only` to stop early per bait
 - Pre-filter contigs if possible (subset input FASTA)

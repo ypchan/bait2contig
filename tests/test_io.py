@@ -70,7 +70,7 @@ def test_lineage_duplicate_bait_id(tmp_path):
 
 
 def test_paf_parse_basic():
-    hit = parse_paf_line("bait1\t100\t5\t95\t+\tcontig1\t1000\t10\t100\t81\t90\t60")
+    hit = parse_paf_line("contig1\t1000\t10\t100\t+\tbait1\t100\t5\t95\t81\t90\t60")
     assert hit.bait_id == "bait1"
     assert hit.ctg_id == "contig1"
     assert hit.ctg_len == 1000
@@ -80,6 +80,14 @@ def test_paf_parse_basic():
 
 
 def test_identity_and_cov_bait():
-    hit = parse_paf_line("bait1\t200\t20\t180\t+\tcontig1\t1000\t10\t170\t144\t160\t60")
+    hit = parse_paf_line("contig1\t1000\t10\t170\t+\tbait1\t200\t20\t180\t144\t160\t60")
     assert hit.identity == pytest.approx(144 / 160)
     assert hit.cov_bait == pytest.approx(160 / 200)
+
+
+def test_paf_parse_legacy_query_is_bait():
+    hit = parse_paf_line("bait1\t100\t5\t95\t+\tcontig1\t1000\t10\t100\t81\t90\t60", query_is_bait=True)
+    assert hit.bait_id == "bait1"
+    assert hit.ctg_id == "contig1"
+    assert hit.bait_start == 5
+    assert hit.ctg_start == 10

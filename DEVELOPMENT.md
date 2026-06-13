@@ -85,18 +85,18 @@ This document records implementation details that are easy to forget when mainta
    - output path sanity
 3. Actual output paths are resolved with `gzip_output_path()`.
 4. Resume checks run before recomputation when `--resume` is used.
-5. Bait FASTA, lineage, and circular-list inputs are loaded.
+5. Optional lineage and circular-list inputs are loaded.
 6. The contig FASTA is not loaded into memory by default.
 7. minimap2 is executed as:
 
    ```bash
-   minimap2 -x {preset} -t {threads} {contigs} {bait} > {tmp_paf}
+   minimap2 -x {preset} -t {threads} {bait_or_bait_index} {contigs} > {tmp_paf}
    ```
 
-   This order is required. Contigs are the target/reference and bait sequences are the query. With `--minimap2-jobs > 1`, bait records are split into chunks, minimap2 is run concurrently for each chunk, and PAF chunks are concatenated in chunk order. In PAF:
+   This order is required. Bait/reference sequences are the target and contigs are the query. If `--bait-index` is provided, the prebuilt minimap2 index is used as the target. With `--minimap2-jobs > 1` and no `--bait-index`, bait records are split into target chunks, minimap2 is run concurrently for each chunk, and PAF chunks are concatenated in chunk order. In PAF:
 
-   - query ID is `bait_id`
-   - target ID is `ctg_id`
+   - query ID is `ctg_id`
+   - target ID is `bait_id`
 
 8. PAF hits are parsed into `PafHit`.
 9. If contig metadata or sequences are needed, a text contig FASTA index is reused or built.
@@ -117,14 +117,14 @@ PAF fields used:
 
 | PAF index | Meaning |
 | --- | --- |
-| 0 | query ID, stored as `bait_id` |
-| 1 | query length, stored as `bait_len` |
-| 2 | query start, stored as `bait_start` |
-| 3 | query end, stored as `bait_end` |
-| 5 | target ID, stored as `ctg_id` |
-| 6 | target length, stored as `ctg_len` unless FASTA length is available |
-| 7 | target start, stored as `ctg_start` |
-| 8 | target end, stored as `ctg_end` |
+| 0 | query ID, stored as `ctg_id` |
+| 1 | query length, stored as `ctg_len` unless FASTA length is available |
+| 2 | query start, stored as `ctg_start` |
+| 3 | query end, stored as `ctg_end` |
+| 5 | target ID, stored as `bait_id` |
+| 6 | target length, stored as `bait_len` |
+| 7 | target start, stored as `bait_start` |
+| 8 | target end, stored as `bait_end` |
 | 9 | residue matches |
 | 10 | alignment block length, stored as `aln_length` |
 
@@ -132,7 +132,7 @@ Derived metrics:
 
 ```text
 identity = residue_matches / alignment_block_length
-cov_bait = (query_end - query_start) / query_len
+cov_bait = (target_end - target_start) / target_len
 ```
 
 Output formatting:
@@ -299,6 +299,7 @@ Search resume parameter keys include:
 - terminal filter settings
 - preset
 - minimap2 version
+- bait index path
 - extraction settings
 
 Summarize resume parameter keys include:
@@ -458,7 +459,7 @@ Keep changes conservative:
 - Keep user-facing text in English.
 - Preserve TSV column order unless making an intentional format change.
 - Preserve log marker names and key names for resume compatibility.
-- Preserve minimap2 target/query order.
+- Preserve minimap2 target/query semantics.
 - Add tests for behavior changes.
 - Update README and this file when changing CLI flags, output schema, resume parameters, or filtering logic.
 

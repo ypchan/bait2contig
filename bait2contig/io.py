@@ -26,17 +26,17 @@ class FastaRecord:
 
 @dataclass(frozen=True)
 class PafHit:
-    """A parsed PAF alignment with bait2contig-derived fields."""
+    """A parsed PAF alignment normalized to bait2contig semantic fields."""
 
     bait_id: str
     bait_len: int
-    query_start: int
-    query_end: int
+    bait_start: int
+    bait_end: int
     strand: str
     ctg_id: str
     ctg_len: int
-    target_start: int
-    target_end: int
+    ctg_start: int
+    ctg_end: int
     residue_matches: int
     aln_length: int
     mapping_quality: int
@@ -139,6 +139,28 @@ def read_fasta(path: str | Path, progress: Optional[FastaProgressCallback] = Non
     return records
 
 
+def read_fasta_ids(path: str | Path, progress: Optional[FastaProgressCallback] = None) -> set[str]:
+    """Read only FASTA record IDs without storing sequences."""
+
+    ids: set[str] = set()
+    with open_text(path, "rt") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if progress is not None:
+                progress(len(line), 0, 0)
+            if not line.startswith(">"):
+                continue
+            header = line[1:].strip()
+            if not header:
+                raise ValueError(f"empty FASTA header at line {line_number}")
+            record_id = fasta_id_from_header(header)
+            if record_id in ids:
+                raise ValueError(f"duplicate FASTA ID: {record_id}")
+            ids.add(record_id)
+            if progress is not None:
+                progress(0, 1, 0)
+    return ids
+
+
 def write_fasta(records: Iterable[Tuple[str, str]], path: str | Path, line_width: int = 80) -> None:
     """Write FASTA records as (header, sequence) tuples."""
 
@@ -192,37 +214,60 @@ def read_circular_list(path: str | Path) -> set[str]:
     return contigs
 
 
-def parse_paf_line(line: str, line_number: int = 0) -> PafHit:
-    """Parse one minimap2 PAF line and compute identity and bait coverage."""
+def parse_paf_line(line: str, line_number: int = 0, *, query_is_bait: bool = False) -> PafHit:
+    """Parse one minimap2 PAF line and compute identity and bait coverage.
+
+    By default, bait2contig expects minimap2 to run with contigs as the query
+    and bait/reference sequences as the target. Set query_is_bait=True only for
+    legacy PAF produced in the older bait-query orientation.
+    """
 
     fields = line.rstrip("\n\r").split("\t")
     if len(fields) < 12:
         where = f" at line {line_number}" if line_number else ""
         raise ValueError(f"PAF record{where} has fewer than 12 columns")
-    bait_id = fields[0]
-    bait_len = int(fields[1])
+    query_id = fields[0]
+    query_len = int(fields[1])
     query_start = int(fields[2])
     query_end = int(fields[3])
     strand = fields[4]
-    ctg_id = fields[5]
-    ctg_len = int(fields[6])
+    target_id = fields[5]
+    target_len = int(fields[6])
     target_start = int(fields[7])
     target_end = int(fields[8])
     residue_matches = int(fields[9])
     aln_length = int(fields[10])
     mapping_quality = int(fields[11])
+    if query_is_bait:
+        bait_id = query_id
+        bait_len = query_len
+        bait_start = query_start
+        bait_end = query_end
+        ctg_id = target_id
+        ctg_len = target_len
+        ctg_start = target_start
+        ctg_end = target_end
+    else:
+        ctg_id = query_id
+        ctg_len = query_len
+        ctg_start = query_start
+        ctg_end = query_end
+        bait_id = target_id
+        bait_len = target_len
+        bait_start = target_start
+        bait_end = target_end
     identity = residue_matches / aln_length if aln_length else 0.0
-    cov_bait = (query_end - query_start) / bait_len if bait_len else 0.0
+    cov_bait = (bait_end - bait_start) / bait_len if bait_len else 0.0
     return PafHit(
         bait_id=bait_id,
         bait_len=bait_len,
-        query_start=query_start,
-        query_end=query_end,
+        bait_start=bait_start,
+        bait_end=bait_end,
         strand=strand,
         ctg_id=ctg_id,
         ctg_len=ctg_len,
-        target_start=target_start,
-        target_end=target_end,
+        ctg_start=ctg_start,
+        ctg_end=ctg_end,
         residue_matches=residue_matches,
         aln_length=aln_length,
         mapping_quality=mapping_quality,
@@ -231,7 +276,7 @@ def parse_paf_line(line: str, line_number: int = 0) -> PafHit:
     )
 
 
-def parse_paf(path: str | Path) -> List[PafHit]:
+def parse_paf(path: str | Path, *, query_is_bait: bool = False) -> List[PafHit]:
     """Parse a plain-text PAF file."""
 
     hits: List[PafHit] = []
@@ -239,7 +284,7 @@ def parse_paf(path: str | Path) -> List[PafHit]:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
-            hits.append(parse_paf_line(line, line_number))
+            hits.append(parse_paf_line(line, line_number, query_is_bait=query_is_bait))
     return hits
 
 

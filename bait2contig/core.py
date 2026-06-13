@@ -40,6 +40,7 @@ from .io import (
     parse_paf,
     read_circular_list,
     read_fasta,
+    read_fasta_ids,
     read_lineage,
     write_fasta,
     write_tsv,
@@ -161,10 +162,10 @@ def annotate_paf_hits(
                 ctg_len=ctg_len,
                 is_circular=is_circular,
                 bait_len=hit.bait_len,
-                bait_start=hit.query_start,
-                bait_end=hit.query_end,
-                ctg_start=hit.target_start,
-                ctg_end=hit.target_end,
+                bait_start=hit.bait_start,
+                bait_end=hit.bait_end,
+                ctg_start=hit.ctg_start,
+                ctg_end=hit.ctg_end,
                 lineage=lineage.get(hit.bait_id, "") if lineage is not None else None,
             )
         )
@@ -347,6 +348,7 @@ def build_search_params(args, actual_out: str, actual_extract: Optional[str], mi
         "gzip": bool(args.gzip),
         "contigs": str(Path(args.contigs).resolve()),
         "bait": str(Path(args.bait).resolve()),
+        "bait_index": abs_or_na(args.bait_index),
         "lineage": abs_or_na(args.lineage),
         "circular_list": abs_or_na(args.circular_list),
         "identity": args.identity,
@@ -381,6 +383,7 @@ def search_resume_params(start_params: dict[str, object]) -> dict[str, object]:
         "gzip",
         "contigs",
         "bait",
+        "bait_index",
         "lineage",
         "circular_list",
         "identity",
@@ -412,6 +415,8 @@ def validate_search_args(args) -> None:
         raise SearchError("--extract-include-lineage requires --extract-rename.")
     require_existing_file(args.contigs, "--contigs")
     require_existing_file(args.bait, "--bait")
+    if args.bait_index:
+        require_existing_file(args.bait_index, "--bait-index")
     if args.lineage:
         require_existing_file(args.lineage, "--lineage")
     if args.circular_list:
@@ -553,7 +558,7 @@ def run_parallel_minimap2(
         futures = {}
         with ThreadPoolExecutor(max_workers=len(chunks), thread_name_prefix="bait2contig-minimap2") as executor:
             for index, (bait_path, paf_path, thread_count) in enumerate(zip(bait_paths, paf_paths, thread_counts), start=1):
-                command = [executable, "-x", preset, "-t", str(thread_count), contigs, bait_path]
+                command = [executable, "-x", preset, "-t", str(thread_count), bait_path, contigs]
                 futures[executor.submit(execute_minimap2_command, command, paf_path, monitor)] = index
             results: dict[int, tuple[int, str]] = {}
             for future in as_completed(futures):
@@ -583,15 +588,16 @@ def run_minimap2(
     threads: int,
     jobs: int,
     contigs: str,
-    bait: str,
+    bait_target: str,
     bait_records: Sequence[FastaRecord],
     tmp_paf: str,
     tmp_dir: str | Path,
     logger: Logger,
     monitor: ResourceMonitor,
 ) -> None:
-    command = [executable, "-x", preset, "-t", str(threads), contigs, bait]
+    command = [executable, "-x", preset, "-t", str(threads), bait_target, contigs]
     logger.info("running minimap2")
+    logger.info("minimap2 orientation: contigs=query, bait/reference=target")
     logger.info(f"minimap2 threads: {threads}")
     if jobs > 1 and len(bait_records) > 1:
         run_parallel_minimap2(
@@ -718,6 +724,24 @@ def load_bait_fasta(args, *, logger: Logger, monitor: ResourceMonitor) -> Dict[s
     return load_fasta_file(args.bait, description="bait FASTA", logger=logger)
 
 
+def load_bait_ids(args, *, logger: Logger, monitor: ResourceMonitor) -> set[str]:
+    monitor.set_stage("loading_bait_ids")
+    logger.info("loading bait FASTA IDs")
+    with make_fasta_progress(logger) as progress:
+        total = fasta_progress_total(args.bait)
+        task_id = progress.add_task(
+            "bait FASTA IDs",
+            total=total,
+            records="0",
+            bases="0 bp",
+        )
+        tracker = FastaProgressTracker(progress, task_id, total)
+        try:
+            return read_fasta_ids(args.bait, progress=tracker)
+        finally:
+            tracker.flush()
+
+
 def load_contigs_into_memory(args, *, logger: Logger, monitor: ResourceMonitor) -> Dict[str, FastaRecord]:
     monitor.set_stage("loading_contigs_fasta")
     logger.warn("contig index disabled; loading contig FASTA into memory.")
@@ -836,28 +860,45 @@ def run_search(args) -> int:
         if executable is None:
             raise SearchError("minimap2 was not found. Please install minimap2 or provide its path with --minimap2.")
 
-        bait = load_bait_fasta(args, logger=logger, monitor=monitor)
-        logger.info(f"loaded bait sequences: {len(bait)}")
-
         monitor.set_stage("loading_annotations")
         lineage = read_lineage(args.lineage) if args.lineage else None
-        if lineage is not None:
-            extra_lineage_ids = sorted(set(lineage) - set(bait))
+        bait_records: list[FastaRecord] = []
+        bait_ids: set[str] = set()
+        bait_target = args.bait_index or args.bait
+        if args.bait_index:
+            logger.info(f"using prebuilt bait minimap2 index: {args.bait_index}")
+            if args.minimap2_jobs > 1:
+                logger.warn("--minimap2-jobs is ignored when --bait-index is provided.")
+            if lineage is not None:
+                logger.info("lineage mapping enabled; lineage values will be looked up by bait/reference target ID.")
+        elif args.minimap2_jobs > 1:
+            bait = load_bait_fasta(args, logger=logger, monitor=monitor)
+            bait_records = list(bait.values())
+            bait_ids = set(bait)
+            logger.info(f"loaded bait sequences: {len(bait):,}")
+        elif lineage is not None:
+            bait_ids = load_bait_ids(args, logger=logger, monitor=monitor)
+            logger.info(f"loaded bait sequence IDs: {len(bait_ids):,}")
+        else:
+            logger.info("using bait FASTA directly as minimap2 target")
+
+        if lineage is not None and bait_ids:
+            extra_lineage_ids = sorted(set(lineage) - bait_ids)
             for bait_id in extra_lineage_ids:
                 logger.warn(f"lineage contains bait_id not present in bait FASTA: {bait_id}")
         circular_ids = read_circular_list(args.circular_list) if args.circular_list else None
 
         tmp_paf = make_tmp_paf(tmp_dir)
         monitor.set_stage("running_minimap2")
-        minimap2_jobs = resolve_minimap2_jobs(args, len(bait))
+        minimap2_jobs = resolve_minimap2_jobs(args, len(bait_records)) if bait_records else 1
         run_minimap2(
             executable=executable,
             preset=args.preset,
             threads=args.threads,
             jobs=minimap2_jobs,
             contigs=args.contigs,
-            bait=args.bait,
-            bait_records=list(bait.values()),
+            bait_target=bait_target,
+            bait_records=bait_records,
             tmp_paf=tmp_paf,
             tmp_dir=tmp_dir,
             logger=logger,

@@ -19,7 +19,7 @@ from bait2contig.core import (
     select_extraction_hits,
     split_bait_records,
 )
-from bait2contig.io import FastaRecord, open_text, read_fasta
+from bait2contig.io import FastaRecord, open_text, read_fasta, read_tsv
 from bait2contig.log import DONE_MARKER, FAILED_MARKER, START_MARKER, check_resume, parse_marker_blocks
 
 
@@ -294,7 +294,7 @@ def test_run_parallel_minimap2_combines_chunks_in_order(tmp_path, monkeypatch):
     tmp_paf = tmp_path / "combined.paf"
 
     def fake_execute(command, paf_path, monitor):
-        bait_path = Path(command[-1])
+        bait_path = Path(command[-2])
         headers = [
             line[1:].strip()
             for line in bait_path.read_text(encoding="utf-8").splitlines()
@@ -323,6 +323,77 @@ def test_run_parallel_minimap2_combines_chunks_in_order(tmp_path, monkeypatch):
         "b2\tthreads=2",
         "b3\tthreads=2",
         "b4\tthreads=2",
+    ]
+
+
+def test_search_maps_contigs_as_query_and_adds_lineage(tmp_path):
+    contigs = tmp_path / "contigs.fa"
+    bait = tmp_path / "bait.fa"
+    lineage = tmp_path / "lineage.tsv"
+    out = tmp_path / "hits.tsv"
+    fake_minimap2 = tmp_path / "minimap2"
+
+    contigs.write_text(">ctg1\n" + "A" * 1000 + "\n", encoding="utf-8")
+    bait.write_text(">bait1\n" + "A" * 1000 + "\n", encoding="utf-8")
+    lineage.write_text("bait_id\tlineage\nbait1\td__A;p__B\n", encoding="utf-8")
+    fake_minimap2.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import pathlib",
+                "import sys",
+                "if '--version' in sys.argv:",
+                "    print('fake-minimap2')",
+                "    raise SystemExit(0)",
+                "target = pathlib.Path(sys.argv[-2]).name",
+                "query = pathlib.Path(sys.argv[-1]).name",
+                "if target != 'bait.fa' or query != 'contigs.fa':",
+                "    print(f'unexpected order: target={target} query={query}', file=sys.stderr)",
+                "    raise SystemExit(2)",
+                "print('ctg1\\t1000\\t10\\t900\\t+\\tbait1\\t1000\\t0\\t990\\t980\\t990\\t60')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_minimap2.chmod(0o755)
+
+    exit_code = main(
+        [
+            "search",
+            "--contigs",
+            str(contigs),
+            "--bait",
+            str(bait),
+            "--lineage",
+            str(lineage),
+            "--out",
+            str(out),
+            "--identity",
+            "0.9",
+            "--coverage",
+            "0.9",
+            "--no-terminal-filter",
+            "--minimap2",
+            str(fake_minimap2),
+            "--quiet",
+        ]
+    )
+
+    assert exit_code == 0
+    columns, rows = read_tsv(out)
+    assert "lineage" in columns
+    assert rows == [
+        {
+            "ctg_id": "ctg1",
+            "bait_id": "bait1",
+            "identity": "0.989899",
+            "aln_length": "990",
+            "cov_bait": "0.990000",
+            "ctg_len": "1000",
+            "is_circular": "False",
+            "lineage": "d__A;p__B",
+        }
     ]
 
 
@@ -427,7 +498,9 @@ def test_cli_search_help(capsys):
     assert "--terminal-tolerance" in output
     assert "Minimum alignment identity. (default: 0.97)" in output
     assert "Total minimap2 thread budget. (default: 8)" in output
-    assert "Parallel minimap2 processes for splitting bait FASTA. (default: 1)" in output
+    assert "Parallel minimap2 processes for splitting bait FASTA" in output
+    assert "--bait-index is not used. (default: 1)" in output
+    assert "--bait-index" in output
     assert "Text FASTA index path. Default: <contigs>.bait2contig.fai." in output
     assert "Threads for building plain FASTA indexes. Use 0 to follow --threads." in output
     assert "Minimum identity for extracted contigs. Default: --identity." in output

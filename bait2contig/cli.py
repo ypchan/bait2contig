@@ -247,7 +247,12 @@ def add_search_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=1,
         metavar="INT",
-        help="Parallel minimap2 processes for splitting bait FASTA.",
+        help="Parallel minimap2 processes for splitting bait FASTA when --bait-index is not used.",
+    )
+    mapping.add_argument(
+        "--bait-index",
+        metavar="FILE",
+        help="Optional prebuilt minimap2 index for bait/reference FASTA.",
     )
     mapping.add_argument("--minimap2", default="minimap2", metavar="PATH", help="Path to minimap2 executable.")
     mapping.add_argument("--keep-paf", action="store_true", help="Keep intermediate PAF output.")

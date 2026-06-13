@@ -218,8 +218,11 @@ Minimap2 preset. Default: asm10.
 Total minimap2 thread budget. Default: 8.
 
 --minimap2-jobs INT
-Parallel minimap2 processes for splitting bait FASTA. Each job receives part of the --threads budget.
+Parallel minimap2 processes for splitting bait FASTA when --bait-index is not used. Each job receives part of the --threads budget.
 Default: 1.
+
+--bait-index FILE
+Optional prebuilt minimap2 index for bait/reference FASTA.
 
 --minimap2 PATH
 Path to minimap2 executable. Default: minimap2.
@@ -319,19 +322,19 @@ Important:
 
 The internal minimap2 command should be:
 
-minimap2 -x {preset} -t {threads} {contigs} {bait} > {tmp_paf}
+minimap2 -x {preset} -t {threads} {bait_or_bait_index} {contigs} > {tmp_paf}
 
-If --minimap2-jobs is greater than 1, split bait records into chunks, cap the actual job count to the bait count and total thread budget, run minimap2 jobs concurrently, then concatenate PAF chunks in chunk order. This mode is intended for cases where one minimap2 process cannot keep the requested threads busy.
+If --minimap2-jobs is greater than 1 and --bait-index is not used, split bait records into chunks, cap the actual job count to the bait count and total thread budget, run minimap2 jobs concurrently, then concatenate PAF chunks in chunk order. This mode is intended for cases where one minimap2 process cannot keep the requested threads busy.
 
 The order is important:
 
-target/reference = contigs
-query = bait
+target/reference = bait or bait minimap2 index
+query = contigs
 
 This ensures that in the PAF file:
 
-query_id  = bait_id
-target_id = ctg_id
+query_id  = ctg_id
+target_id = bait_id
 
 Do not reverse the order.
 
@@ -374,15 +377,15 @@ PAF first 12 columns:
 
 In bait2contig:
 
-bait_id = query_id
-bait_len = query_len
-ctg_id = target_id
-ctg_len = target_len
+ctg_id = query_id
+ctg_len = query_len
+bait_id = target_id
+bait_len = target_len
 
 Calculate:
 
 identity = residue_matches / alignment_block_length
-cov_bait = (query_end - query_start) / query_len
+cov_bait = (target_end - target_start) / target_len
 aln_length = alignment_block_length
 
 Filter hits using:
